@@ -438,6 +438,29 @@ mod tests {
     }
 
     #[test]
+    fn a_note_can_report_drift_even_when_a_fallback_filled_the_gap() {
+        // `unreadable` is set in the limits loop and never cleared, so the
+        // scalar fallback can recover the very window that failed and still
+        // leave a note. That is why the field reports "part of the response
+        // could not be read" rather than promising a missing window — the
+        // drift is real and worth saying even when the row is complete.
+        let body = r#"{"limits":[
+            {"kind":"session","group":"session","percent":4,
+             "resets_at":"1786718400","scope":null}
+        ],"five_hour":{"utilization":9,"resets_at":"2026-08-14T14:40:00Z"}}"#;
+        let usage = parse(body).unwrap();
+        assert_eq!(
+            usage.interval.as_ref().unwrap().used_percent,
+            9.0,
+            "the fallback supplies the window"
+        );
+        assert!(
+            usage.degraded.is_some(),
+            "and the drift that forced it is still reported"
+        );
+    }
+
+    #[test]
     fn a_clean_response_carries_no_degradation_note() {
         // The note must mean something when it appears, so it must be absent
         // on the ordinary path.

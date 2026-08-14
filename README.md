@@ -206,12 +206,14 @@ instead of either window.
 `scoped` is the list of per-model weekly caps. It is omitted entirely when the
 provider has none, so existing consumers are unaffected.
 
-`degraded` appears only when one window failed to parse while the account
-otherwise reported fine. The row still carries usable numbers; `degraded` says
-why the missing window is missing, since an omitted window otherwise looks
-exactly like one the provider never sends. It is absent when nothing was lost,
-so existing consumers are unaffected. In table mode the same text goes to
-stderr, keeping stdout pipeable and the table one line per account.
+`degraded` appears only when part of the response could not be read while the
+rest still parsed. The row keeps its numbers, and the string says what failed —
+an omitted window otherwise looks exactly like one the provider never sends. It
+reports the drift rather than promising a hole: a fallback may have recovered
+the window whose primary source failed, leaving the row complete. Absent on
+every healthy row and for every provider other than Anthropic, so existing
+consumers are unaffected. In table mode the same note goes to stderr, after the
+table, keeping stdout pipeable and the table one line per account.
 
 ```json
 [

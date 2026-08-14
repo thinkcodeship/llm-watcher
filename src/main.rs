@@ -58,8 +58,10 @@ struct Report {
     scoped: Vec<ScopedReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    /// Why a window is missing, when the account otherwise reported fine.
-    /// Unlike `error`, the row still carries usable numbers.
+    /// Part of the response could not be read, though the account otherwise
+    /// reported fine. Unlike `error`, the row still carries usable numbers —
+    /// and a fallback may have recovered the failed window, so this reports the
+    /// drift rather than promising a hole.
     #[serde(skip_serializing_if = "Option::is_none")]
     degraded: Option<String>,
 }
@@ -197,14 +199,8 @@ fn run() -> Result<std::process::ExitCode> {
         println!("{}", serde_json::to_string_pretty(&reports)?);
     } else {
         print_table(&reports);
-        // On stderr, and after the table: a dropped window renders as the same
-        // `-` an absent one does, so the row alone cannot say a window was
-        // lost. Kept off stdout so piping and the one-line-per-row shape of the
-        // table are both undisturbed.
-        for report in &reports {
-            if let Some(reason) = &report.degraded {
-                eprintln!("{} {}: {reason}", "warning:".yellow().bold(), report.name);
-            }
+        for line in degraded_lines(&reports) {
+            eprintln!("{line}");
         }
     }
 
@@ -212,6 +208,29 @@ fn run() -> Result<std::process::ExitCode> {
         &reports,
         args.threshold,
     )))
+}
+
+/// The degradation notices as individual lines, so what reaches stderr can be
+/// asserted on without capturing the stream — the same reason `table_lines`
+/// exists.
+///
+/// These go to stderr rather than the table: a dropped window renders as the
+/// same `-` an absent one does, so the row alone cannot report the drift, and an
+/// extra table line would break the one-line-per-account shape. `--json` needs
+/// none of this, since it carries `degraded` as a field.
+fn degraded_lines(reports: &[Report]) -> Vec<String> {
+    reports
+        .iter()
+        .filter_map(|report| {
+            report.degraded.as_ref().map(|reason| {
+                format!(
+                    "{} {}: part of the response could not be read: {reason}",
+                    "warning:".yellow().bold(),
+                    report.name
+                )
+            })
+        })
+        .collect()
 }
 
 /// Exit status: `2` when nothing could be read at all, `1` when a threshold was
@@ -573,6 +592,53 @@ mod tests {
             degraded: None,
         }];
         assert_eq!(outcome_code(&reports, Some(2.0)), 1);
+    }
+
+    #[test]
+    fn a_degraded_row_names_both_the_account_and_the_reason() {
+        // This path only ever reaches stderr, so without pinning it here its
+        // format, the account it names, and its colour behaviour are untested.
+        colored::control::set_override(false);
+        let mut row = report("claude", Some(window(4.0, Some(0.3), None)), None);
+        row.degraded = Some(r#"Anthropic sent an unreadable reset time "1786718400""#.into());
+        let lines = degraded_lines(std::slice::from_ref(&row));
+        colored::control::unset_override();
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("claude"), "{:?}", lines[0]);
+        assert!(lines[0].contains("1786718400"), "{:?}", lines[0]);
+        assert!(!lines[0].contains('\x1b'), "no_color must reach it too");
+    }
+
+    #[test]
+    fn a_healthy_run_emits_no_warning_lines_at_all() {
+        // The note has to mean something when it appears, which requires it not
+        // to appear otherwise.
+        let reports = vec![report("a", Some(window(10.0, Some(0.5), None)), None)];
+        assert!(degraded_lines(&reports).is_empty());
+    }
+
+    #[test]
+    fn a_degraded_row_serializes_its_reason_and_a_healthy_row_omits_the_key() {
+        // The JSON output is a public interface, so the presence, name and
+        // scalar shape of this key are what a consumer keys on. A healthy row
+        // must gain no new key at all — not `null`, absent.
+        let mut row = report("claude", Some(window(4.0, Some(0.3), None)), None);
+        row.degraded = Some("unreadable reset time".into());
+        let json = serde_json::to_string(std::slice::from_ref(&row)).unwrap();
+        assert!(
+            json.contains(r#""degraded":""#),
+            "a string, not an object: {json}"
+        );
+        assert!(json.contains("unreadable reset time"), "{json}");
+        assert!(
+            json.contains(r#""used_percent""#),
+            "windows still report: {json}"
+        );
+
+        let healthy = vec![report("a", Some(window(10.0, Some(0.5), None)), None)];
+        let json = serde_json::to_string(&healthy).unwrap();
+        assert!(!json.contains("degraded"), "{json}");
     }
 
     #[test]
