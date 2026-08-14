@@ -245,8 +245,18 @@ fn interpret_keychain_output(
         // Not `from_utf8_lossy`: replacement characters would reach
         // `parse_store` as valid UTF-8 and be reported as malformed JSON, one
         // layer below where the problem actually is.
-        return String::from_utf8(stdout)
-            .map_err(|e| anyhow!("the macOS Keychain returned non-UTF-8 bytes: {e}"));
+        //
+        // Only the offset is carried out. `String::from_utf8` moves the buffer
+        // into the error it returns, and that buffer is the credential — the
+        // error derives `Debug`, so keeping it is one `{:?}` away from printing
+        // a live token to stdout via `main`'s error cell.
+        return String::from_utf8(stdout).map_err(|e| {
+            let offset = e.utf8_error().valid_up_to();
+            anyhow!(
+                "the macOS Keychain returned non-UTF-8 bytes at offset {offset} \
+                 — the credential store is corrupt"
+            )
+        });
     }
     // A denied access prompt, a locked login keychain, a corrupt keychain and a
     // genuinely absent item all exit non-zero. Only the last is fixed by
@@ -271,9 +281,15 @@ fn interpret_keychain_output(
     ))
 }
 
+/// Absolute path deliberately: this call reads a credential and its stdout is
+/// then trusted as one, so it must not be answerable by a `security` that
+/// happens to sit earlier on `PATH`.
+#[cfg(target_os = "macos")]
+const SECURITY_BIN: &str = "/usr/bin/security";
+
 #[cfg(target_os = "macos")]
 fn keychain_store() -> Option<Result<String>> {
-    let output = std::process::Command::new("security")
+    let output = std::process::Command::new(SECURITY_BIN)
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
         .output();
     Some(match output {
@@ -283,7 +299,7 @@ fn keychain_store() -> Option<Result<String>> {
             out.stdout,
             &out.stderr,
         ),
-        Err(e) => Err(anyhow!("could not run `security`: {e}")),
+        Err(e) => Err(anyhow!("could not run {SECURITY_BIN}: {e}")),
     })
 }
 
@@ -387,6 +403,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("non-UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn a_non_utf8_keychain_document_is_never_echoed_back() {
+        // The buffer handed to String::from_utf8 IS the credential, and the
+        // error it returns derives Debug — carrying it is one `{:?}` away from
+        // printing a live token to stdout.
+        let mut document = br#"{"accessToken":"sk-ant-oat01-live"}"#.to_vec();
+        document.push(0xff);
+        let err = format!(
+            "{:?}",
+            interpret_keychain_output(true, "exit status: 0", document, b"").unwrap_err()
+        );
+        assert!(!err.contains("sk-ant-oat01-live"), "{err}");
+        assert!(!err.contains("115, 107, 45"), "no byte dump either: {err}");
     }
 
     #[test]
