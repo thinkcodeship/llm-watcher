@@ -87,22 +87,62 @@ struct Model {
     display_name: Option<String>,
 }
 
+/// The reset time as epoch milliseconds.
+///
+/// Absent is absent. Present but unreadable is a shape change, not an absent
+/// window: both used to collapse to the same boundary-less window, which renders
+/// as the very `--` a healthy freshly-reset window shows, so a changed timestamp
+/// format would have read as normal operation indefinitely.
+fn reset_ms(resets_at: Option<&str>) -> Result<Option<i64>> {
+    match resets_at {
+        None => Ok(None),
+        Some(text) => rfc3339::to_epoch_ms(text)
+            .map(Some)
+            .ok_or_else(|| anyhow!("Anthropic sent an unreadable reset time {text:?}")),
+    }
+}
+
 /// Build a window from a consumed percentage and a reset time.
 ///
 /// Anthropic reports only the reset, so the start is one span back from it. With
 /// no reset time the window has no boundaries and therefore no pace signal —
 /// usage still reports.
 fn window(used_percent: f64, resets_at: Option<&str>, span_ms: i64) -> Result<Window> {
-    match resets_at {
-        None => Ok(Window::new(used_percent, None, None)),
-        // Present but unreadable is a shape change, not an absent window. Both
-        // used to collapse to the same boundary-less window, which renders as
-        // the very `--` a healthy freshly-reset window shows — so a changed
-        // timestamp format would have read as normal operation indefinitely.
-        Some(text) => {
-            let end = rfc3339::to_epoch_ms(text)
-                .ok_or_else(|| anyhow!("Anthropic sent an unreadable reset time {text:?}"))?;
-            Ok(Window::new(used_percent, Some(end - span_ms), Some(end)))
+    let end = reset_ms(resets_at)?;
+    Ok(Window::new(used_percent, end.map(|end| end - span_ms), end))
+}
+
+/// A per-model cap, whose group may not have a span this adapter knows.
+///
+/// An unknown span means no *start*, and therefore no pace. It does not mean no
+/// *end*: the reset time was readable, and [`Window`] counts down from an end
+/// with no start — see `an_end_without_a_start_gives_no_pace_but_still_counts_down`
+/// in [`crate::pace`]. Dropping it would print strictly less than the response
+/// gave us, and would skip validating a timestamp that is right there.
+fn scoped_window(
+    used_percent: f64,
+    resets_at: Option<&str>,
+    span_ms: Option<i64>,
+) -> Result<Window> {
+    match span_ms {
+        Some(span) => window(used_percent, resets_at, span),
+        None => Ok(Window::new(used_percent, None, reset_ms(resets_at)?)),
+    }
+}
+
+/// Keep a window, or remember why it could not be built.
+///
+/// One unreadable reset time must not delete the windows that parsed cleanly —
+/// that is the rule `main` applies across accounts ("One bad key must not hide
+/// the other plans"), applied to the windows within one account. The remembered
+/// reason becomes the error only when nothing survived, which is the shape a
+/// real format change takes anyway.
+fn take(built: Option<Result<Window>>, unreadable: &mut Option<String>) -> Option<Window> {
+    match built? {
+        Ok(window) => Some(window),
+        Err(e) => {
+            unreadable.get_or_insert_with(|| e.to_string());
+            None
         }
     }
 }
@@ -150,6 +190,8 @@ pub fn parse(body: &str) -> Result<Usage> {
     }
 
     let (mut interval, mut weekly, mut scoped) = (None, None, Vec::new());
+    // Collected rather than propagated: see `take`.
+    let mut unreadable: Option<String> = None;
 
     // Slot on `group` plus the presence of `scope`. Keying on `kind` would drop
     // a window the moment Anthropic adds a new one, and keying on `group` alone
@@ -170,29 +212,43 @@ pub fn parse(body: &str) -> Result<Usage> {
             // Keyed on the group like every other arm: a model-scoped session
             // cap runs five hours, not the seven days a scoped entry used to be
             // assumed to have.
-            (group, Some(label)) => scoped.push(ScopedWindow {
-                label,
-                window: match span_for(group) {
-                    Some(span) => window(percent, resets_at, span)?,
-                    None => Window::new(percent, None, None),
-                },
-            }),
-            ("session", None) => interval = Some(window(percent, resets_at, SESSION_MS)?),
-            ("weekly", None) => weekly = Some(window(percent, resets_at, WEEKLY_MS)?),
+            (group, Some(label)) => {
+                let built = scoped_window(percent, resets_at, span_for(group));
+                if let Some(window) = take(Some(built), &mut unreadable) {
+                    scoped.push(ScopedWindow { label, window });
+                }
+            }
+            ("session", None) => {
+                interval = take(
+                    Some(window(percent, resets_at, SESSION_MS)),
+                    &mut unreadable,
+                )
+            }
+            ("weekly", None) => {
+                weekly = take(Some(window(percent, resets_at, WEEKLY_MS)), &mut unreadable)
+            }
             _ => {}
         }
     }
 
     // Fall back to the scalar fields for responses that predate `limits`.
     if interval.is_none() {
-        interval = scalar_window(response.five_hour.as_ref(), SESSION_MS)?;
+        let built = scalar_window(response.five_hour.as_ref(), SESSION_MS).transpose();
+        interval = take(built, &mut unreadable);
     }
     if weekly.is_none() {
-        weekly = scalar_window(response.seven_day.as_ref(), WEEKLY_MS)?;
+        let built = scalar_window(response.seven_day.as_ref(), WEEKLY_MS).transpose();
+        weekly = take(built, &mut unreadable);
     }
 
     if interval.is_none() && weekly.is_none() && scoped.is_empty() {
-        return Err(anyhow!("Anthropic reported no quota windows"));
+        // Nothing survived. If a timestamp was the reason, name it — that is the
+        // diagnosis a format change needs, and it is the shape such a change
+        // takes, since it fails every window at once.
+        return Err(match unreadable {
+            Some(reason) => anyhow!(reason),
+            None => anyhow!("Anthropic reported no quota windows"),
+        });
     }
 
     Ok(Usage {
@@ -289,10 +345,11 @@ mod tests {
     }
 
     #[test]
-    fn a_model_scoped_cap_in_an_unknown_group_reports_usage_without_a_pace() {
+    fn a_model_scoped_cap_in_an_unknown_group_counts_down_but_reports_no_pace() {
         // A group this adapter cannot measure must not borrow some other
-        // window's length: usage still reports, but with no boundaries there is
-        // no pace to be wrong about.
+        // window's length — but the reset time it did send is real, and
+        // `Window` counts down from an end with no start. Dropping it would
+        // print strictly less than the response gave us.
         let body = r#"{"limits":[
             {"kind":"quarterly","group":"quarterly","percent":50,
              "resets_at":"2026-08-14T14:40:00Z",
@@ -301,8 +358,38 @@ mod tests {
         let scoped = parse(body).unwrap().scoped;
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].window.used_percent, 50.0);
-        assert_eq!(scoped[0].window.start_ms, None);
-        assert_eq!(scoped[0].window.end_ms, None);
+        assert_eq!(scoped[0].window.start_ms, None, "no span, so no pace");
+        assert_eq!(scoped[0].window.end_ms, Some(1_786_718_400_000));
+        assert_eq!(scoped[0].window.pace(1_786_700_000_000), None);
+    }
+
+    #[test]
+    fn an_unreadable_reset_time_in_an_unknown_group_is_still_caught() {
+        // The span is unknown, but the timestamp is right there — not reading
+        // it would leave the one arm that never notices a format change.
+        let body = r#"{"limits":[
+            {"kind":"quarterly","group":"quarterly","percent":50,
+             "resets_at":"1786718400","scope":{"model":{"display_name":"Fable"}}}
+        ]}"#;
+        let err = parse(body).unwrap_err().to_string();
+        assert!(err.contains("1786718400"), "{err}");
+    }
+
+    #[test]
+    fn one_unreadable_reset_time_does_not_delete_the_windows_that_parsed() {
+        // Going dark on the whole account is a worse outage than the `--` this
+        // guards against: the user loses the burn warning the tool exists for.
+        // This is `main`'s "one bad key must not hide the other plans", applied
+        // to the windows within one account.
+        let body = r#"{"limits":[
+            {"kind":"session","group":"session","percent":4,
+             "resets_at":"2026-08-14T14:40:00Z","scope":null},
+            {"kind":"weekly_all","group":"weekly","percent":78,
+             "resets_at":"1786718400","scope":null}
+        ]}"#;
+        let usage = parse(body).unwrap();
+        assert_eq!(usage.interval.unwrap().used_percent, 4.0);
+        assert!(usage.weekly.is_none(), "the unreadable one is dropped");
     }
 
     #[test]
