@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="llm-watcher">
+  <title>llm-watcher</title>
+  <rect width="32" height="32" rx="3" fill="#b7410e"/>
+  <!-- the window, and the share of it already spent -->
+  <rect x="6" y="10" width="20" height="4" rx="1" fill="#fdf6ef" opacity="0.45"/>
+  <rect x="6" y="18" width="12" height="4" rx="1" fill="#fdf6ef"/>
+</svg>
