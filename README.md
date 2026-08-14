@@ -202,4 +202,11 @@ Two things worth confirming on a live run:
 
 ## License
 
-MIT. Copyright 2026 Kanshiro LLC.
+Released under the [MIT License](LICENSE) (SPDX identifier: `MIT`).
+
+Copyright (c) 2026 Kanshiro LLC.
+
+You may use, copy, modify, merge, publish, distribute, sublicense, and sell
+copies of this software, provided the copyright notice and the permission
+notice in [`LICENSE`](LICENSE) are included with any substantial portion of it.
+The software comes with no warranty.
