@@ -1,10 +1,13 @@
 //! End-to-end tests against the built binary.
 //!
 //! Every case here is hermetic: `XDG_CONFIG_HOME` points at a scratch directory
-//! and all four provider variables are removed from the child environment, so no
-//! test can reach the network or accidentally depend on the developer's own
-//! keys. Accounts whose `key_env` is unset fail at key resolution, which is
-//! before any HTTP call is made — that is what keeps these fast and offline.
+//! and every provider variable is removed from the child environment, so no test
+//! can reach the network or accidentally depend on the developer's own keys.
+//! Accounts whose credential is unset fail at resolution, which is before any
+//! HTTP call is made — that is what keeps these fast and offline.
+//!
+//! `HOME` is pinned to the scratch directory for the same reason, and it is what
+//! hides a real `~/.claude/.credentials.json` from the Anthropic fallback.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,11 +18,15 @@ const BIN: &str = env!("CARGO_BIN_EXE_llm-watcher");
 
 /// Variables the fallback path probes. All are stripped so a developer running
 /// `cargo test` with real keys exported gets the same result as CI.
-const PROVIDER_VARS: [&str; 4] = [
+const PROVIDER_VARS: [&str; 6] = [
     "MINIMAX_API_KEY",
     "MINIMAX_MAX_API_KEY",
     "ZHIPU_API_KEY",
     "ZAI_API_KEY",
+    // Either of these alone conjures an Anthropic account, and a live token
+    // would make `cargo test` query the real endpoint.
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
 ];
 
 /// A scratch config directory that deletes itself when the test ends.
@@ -318,4 +325,73 @@ fn a_failure_message_names_the_variable_never_a_key_value() {
         combined.contains("not set in the environment"),
         "{combined}"
     );
+}
+
+#[test]
+fn an_anthropic_account_needs_no_key_env_in_the_config() {
+    // A Claude subscription has no API key. Requiring key_env would make the
+    // provider impossible to configure at all.
+    let scratch = Scratch::new();
+    scratch.write_config("[[account]]\nname = \"claude-max\"\nprovider = \"anthropic\"\n");
+    let output = run(&scratch, &[]);
+
+    let combined = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        !combined.contains("key_env"),
+        "a missing key_env must not be an error here: {combined}"
+    );
+    assert!(combined.contains("claude-max"), "{combined}");
+}
+
+#[test]
+fn an_anthropic_account_with_no_credentials_fails_before_any_request() {
+    // HOME is the scratch dir, so there is no credential store to find. The row
+    // must report that rather than hang on a network call.
+    let scratch = Scratch::new();
+    scratch.write_config("[[account]]\nname = \"claude\"\nprovider = \"anthropic\"\n");
+    let output = run(&scratch, &[]);
+
+    assert_eq!(output.status.code(), Some(2), "every account failed");
+    let combined = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        combined.contains("claude") && combined.contains("log in"),
+        "the row should say how to fix it: {combined}"
+    );
+}
+
+#[test]
+fn claude_and_anthropic_name_the_same_provider() {
+    for alias in ["anthropic", "claude", "claude-code"] {
+        let scratch = Scratch::new();
+        scratch.write_config(&format!(
+            "[[account]]\nname = \"x\"\nprovider = \"{alias}\"\n"
+        ));
+        let combined = {
+            let output = run(&scratch, &[]);
+            format!("{}{}", stdout(&output), stderr(&output))
+        };
+        assert!(
+            !combined.contains("unknown provider"),
+            "{alias} should be accepted: {combined}"
+        );
+    }
+}
+
+#[test]
+fn an_anthropic_row_does_not_disturb_the_existing_two_columns() {
+    // The scoped sub-row is rendered per account. With an Anthropic account
+    // alongside the others the header must still be one line and each account
+    // still one row, or the table has silently gained a column.
+    let scratch = Scratch::new();
+    scratch.write_config(
+        "[[account]]\nname = \"mini\"\nprovider = \"minimax\"\nkey_env = \"LLM_WATCHER_TEST_ABSENT_A\"\n\
+         [[account]]\nname = \"claude\"\nprovider = \"anthropic\"\n",
+    );
+    let text = stdout(&run(&scratch, &[]));
+
+    assert!(
+        text.contains("5H WINDOW") && text.contains("WEEKLY"),
+        "{text}"
+    );
+    assert_eq!(text.lines().count(), 3, "header plus two rows: {text}");
 }

@@ -116,7 +116,7 @@ pub fn parse(body: &str) -> Result<Usage> {
     let interval = iter.next();
     let weekly = iter.next_back();
 
-    Ok(Usage { interval, weekly })
+    Ok(Usage::new(interval, weekly))
 }
 
 #[cfg(test)]

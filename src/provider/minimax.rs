@@ -85,18 +85,18 @@ pub fn parse(body: &str) -> Result<Usage> {
         .or_else(|| response.model_remains.first())
         .ok_or_else(|| anyhow!("MiniMax returned no model_remains entries"))?;
 
-    Ok(Usage {
-        interval: entry
+    Ok(Usage::new(
+        entry
             .current_interval_remaining_percent
             .map(|remaining| Window::new(100.0 - remaining, entry.start_time, entry.end_time)),
-        weekly: entry.current_weekly_remaining_percent.map(|remaining| {
+        entry.current_weekly_remaining_percent.map(|remaining| {
             Window::new(
                 100.0 - remaining,
                 entry.weekly_start_time,
                 entry.weekly_end_time,
             )
         }),
-    })
+    ))
 }
 
 #[cfg(test)]
