@@ -30,13 +30,27 @@ pub const NO_KEYCHAIN_ENV: &str = "LLM_WATCHER_NO_KEYCHAIN";
 /// Keychain service name Claude Code stores its credential document under.
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
+/// How much of `security`'s own diagnosis to carry into the error, in
+/// characters. It shares a table cell with the account name, so it is bounded.
+const DETAIL_LIMIT: usize = 160;
+
+/// Whether a [`NO_KEYCHAIN_ENV`] value switches the Keychain lookup off.
+///
+/// Split from the environment read for the reason [`default_path_from`] is:
+/// mutating real process environment from tests races every other test in the
+/// binary, and asserting on the ambient value additionally fails for anyone who
+/// has this documented switch exported in their own shell.
+fn keychain_disabled_by(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
 /// Whether [`NO_KEYCHAIN_ENV`] switches the Keychain lookup off.
 ///
 /// Deliberately not `cfg`-gated: the Keychain call it guards only exists on
 /// macOS, but the decision itself is platform-independent and therefore
 /// testable everywhere.
 fn keychain_disabled() -> bool {
-    std::env::var_os(NO_KEYCHAIN_ENV).is_some_and(|v| !v.is_empty())
+    keychain_disabled_by(std::env::var_os(NO_KEYCHAIN_ENV))
 }
 
 /// Which Claude Code credential store to read.
@@ -238,8 +252,17 @@ fn interpret_keychain_output(
     // genuinely absent item all exit non-zero. Only the last is fixed by
     // logging in again, so `security`'s own diagnosis is carried through rather
     // than replaced by a guess at which of them happened.
+    //
+    // Collapsed and bounded because it lands in a single table cell: `main`
+    // prints one line per row, and `security` writes free-form multi-line
+    // diagnostics, so an embedded newline would silently grow the table by a
+    // row — the invariant tests/cli.rs pins as one line per account.
     let stderr = String::from_utf8_lossy(stderr);
-    let detail = stderr.trim();
+    let detail = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    let detail = match detail.char_indices().nth(DETAIL_LIMIT) {
+        Some((cut, _)) => format!("{}…", &detail[..cut]),
+        None => detail,
+    };
     Err(anyhow!(
         "could not read {KEYCHAIN_SERVICE:?} from the macOS Keychain ({status}{}{}) \
          — if the item is simply absent, run `claude` to log in",
@@ -281,16 +304,32 @@ mod tests {
         // the tests/cli.rs harness switches it off outright. A blank value must
         // not count, or an accidentally-exported empty variable would silently
         // disable the real lookup for a user.
-        // Safety: this variable is used by no other test in the binary.
-        assert!(!keychain_disabled(), "must default to enabled");
-        std::env::set_var(NO_KEYCHAIN_ENV, "");
-        let blank = keychain_disabled();
-        std::env::set_var(NO_KEYCHAIN_ENV, "1");
-        let set = keychain_disabled();
-        std::env::remove_var(NO_KEYCHAIN_ENV);
-        assert!(!blank, "a blank value must leave the Keychain enabled");
-        assert!(set, "a non-empty value must switch the Keychain off");
-        assert!(!keychain_disabled(), "removal must restore the default");
+        use std::ffi::OsString;
+        assert!(
+            !keychain_disabled_by(None),
+            "unset must leave the Keychain enabled"
+        );
+        assert!(
+            !keychain_disabled_by(Some(OsString::from(""))),
+            "a blank value must leave the Keychain enabled"
+        );
+        assert!(
+            keychain_disabled_by(Some(OsString::from("1"))),
+            "a non-empty value must switch the Keychain off"
+        );
+        assert!(
+            keychain_disabled_by(Some(OsString::from("0"))),
+            "any non-empty value counts, including one that reads as false"
+        );
+    }
+
+    #[test]
+    fn the_no_keychain_variable_keeps_the_name_the_test_harness_spells_out() {
+        // tests/cli.rs runs against the built binary and cannot import this
+        // constant, so it hard-codes the string. Renaming the value here would
+        // compile, pass every test, and silently un-isolate that harness on a
+        // macOS machine that is logged in.
+        assert_eq!(NO_KEYCHAIN_ENV, "LLM_WATCHER_NO_KEYCHAIN");
     }
 
     #[test]
@@ -309,6 +348,34 @@ mod tests {
         .to_string();
         assert!(err.contains("exit status: 36"), "{err}");
         assert!(err.contains("User interaction is not allowed"), "{err}");
+    }
+
+    #[test]
+    fn a_multi_line_keychain_diagnostic_is_collapsed_onto_one_line() {
+        // The error lands in a single table cell, and `main` prints one line
+        // per row — an embedded newline silently grows the table by a row,
+        // breaking the one-line-per-account invariant tests/cli.rs pins.
+        let err = interpret_keychain_output(
+            false,
+            "exit status: 51",
+            Vec::new(),
+            b"SecKeychainSearchCopyNext: authorization denied.\nUser interaction is not allowed.\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains('\n'), "{err:?}");
+        assert!(err.contains("authorization denied"), "{err}");
+        assert!(err.contains("User interaction is not allowed"), "{err}");
+    }
+
+    #[test]
+    fn an_enormous_keychain_diagnostic_is_truncated() {
+        // Unbounded subprocess output would push the account name off the row.
+        let err = interpret_keychain_output(false, "exit status: 1", Vec::new(), &vec![b'x'; 4096])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains('…'), "{err}");
+        assert!(err.len() < 400, "still {} chars", err.len());
     }
 
     #[test]
