@@ -1,5 +1,8 @@
 # llm-watcher
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Rust 2021](https://img.shields.io/badge/rust-2021%20edition-orange.svg)
+
 Answers one question: **am I burning this coding plan too fast?**
 
 ```
@@ -13,10 +16,22 @@ glm            0% used     --                  20% used   0.6x  resets 4d 13h
 Runs, prints, exits. No daemon, no database, no listening port, no background
 process, and nothing written into `~/.claude/`.
 
-## Pace
+## Reading a row
 
-Providers report quota in incompatible units, so raw numbers do not compare. Pace
-normalizes them:
+Every plan gets two windows — the rolling 5-hour cap and the weekly cap — and
+each window prints the same three things:
+
+```
+49% used   0.8x  resets 2d 13h
+│          │     └─ how long until this window rolls over
+│          └─ pace — quota spent against clock elapsed
+└─ share of this window's quota already gone
+```
+
+### Pace
+
+Providers report quota in incompatible units, so raw numbers do not compare.
+Pace normalizes them:
 
 ```
 pace = (fraction of quota consumed) / (fraction of window elapsed)
@@ -28,9 +43,18 @@ pace = (fraction of quota consumed) / (fraction of window elapsed)
 | `> 1.0x` | Exhausts before reset |
 | `< 1.0x` | Headroom remains |
 
+Colour follows the same reading: green below `1.0x`, yellow from `1.0x`, red
+from `1.5x`.
+
 `--` means there is no honest signal yet: a window that just reset, or one whose
 boundaries the provider did not report. A fabricated ratio there reads as an
 emergency, so none is printed.
+
+### Countdowns
+
+Reset times show the two largest units, zeros dropped — `2d 13h`, `4h 50m`,
+`45m`, `30s`, and plain `7d` for a week untouched. Minutes remaining in a
+two-day window is not a number anyone acts on, so it is not shown.
 
 ## Install
 
@@ -77,12 +101,57 @@ llm-watcher --threshold 1.5            # exit 1 if any window is at or past 1.5x
 llm-watcher --no-color
 ```
 
-Exit codes: `0` fine, `1` threshold breached, `2` every account failed or the
-configuration is unusable. A single failing account does not abort the run — the
-error lands on its own row and the other plans still report.
+Accounts are queried one at a time, so a status line names the one in flight
+rather than leaving the terminal silent:
+
+```
+⠹ [2/3] querying minimax-max
+```
+
+It draws on stderr and erases itself on the way out, and switches off entirely
+when stderr is not a terminal. `--json` on stdout is therefore byte-identical
+whether piped or not, and a redirected log collects no cursor escapes.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Ran fine |
+| `1` | `--threshold` was given and some window reached it |
+| `2` | Every account failed, or the configuration is unusable |
+
+A single failing account does not abort the run — the error lands on its own row
+and the other plans still report.
 
 `--threshold` plus `--json` is enough for a cron job or a waybar module without
 any of this needing a daemon.
+
+<details>
+<summary><code>--json</code> output shape</summary>
+
+`interval` is the 5-hour window and `weekly` the weekly one. Both are omitted
+when the provider reports nothing for them, as are `pace` (no honest signal yet)
+and `resets_in_ms` (no boundary reported). A failed account carries `error`
+instead of either window.
+
+```json
+[
+  {
+    "name": "minimax",
+    "provider": "minimax",
+    "interval": { "used_percent": 4.0,  "pace": 0.0792, "resets_in_ms": 8913996 },
+    "weekly":   { "used_percent": 49.0, "pace": 0.7585, "resets_in_ms": 214113996 }
+  },
+  {
+    "name": "glm",
+    "provider": "zai",
+    "interval": { "used_percent": 0.0 },
+    "weekly":   { "used_percent": 20.0, "pace": 0.5542, "resets_in_ms": 386526994 }
+  }
+]
+```
+
+</details>
 
 ## Providers
 
@@ -90,6 +159,9 @@ any of this needing a daemon.
 |----------|----------|------|
 | MiniMax Token Plan | `GET https://api.minimax.io/v1/token_plan/remains` | `Authorization: Bearer <Subscription Key>` |
 | Z.ai / GLM Coding Plan | `GET https://api.z.ai/api/monitor/usage/quota/limit` | `Authorization: <token>` — **no `Bearer` prefix** |
+
+The asymmetry in that last column is real, not a typo. Getting it backwards
+produces a `401` that reads exactly like a bad key.
 
 ### Anthropic Claude Max is not supported
 
@@ -110,7 +182,8 @@ do are inconsistent with each other. What follows was captured live on 2026-08-1
 from a MiniMax Max plan and a GLM Pro plan. Fixtures in `tests/fixtures/` are the
 real documents.
 
-### MiniMax
+<details>
+<summary><b>MiniMax</b> — percentages are inverted, and <code>remains_time</code> is a trap</summary>
 
 ```json
 {
@@ -152,7 +225,10 @@ that rejects API keys with `"cookie is missing, log in again"`
 ([MiniMax-M2#88](https://github.com/MiniMax-AI/MiniMax-M2/issues/88), open since
 2026-03-18). Same for billing history at `/account/amount`.
 
-### Z.ai
+</details>
+
+<details>
+<summary><b>Z.ai</b> — percentages run the other way, and windows are keyed by unit code</summary>
 
 ```json
 { "code": 200, "success": true,
@@ -181,6 +257,8 @@ figure as a percentage of usage. To falsify: burn GLM quota and check whether th
 number climbs (consumed) or falls (remaining). If it falls, invert it in
 `src/provider/zai.rs`.
 
+</details>
+
 ## Verify
 
 ```bash
@@ -188,6 +266,11 @@ cargo test                          # 121 tests, no network
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
+
+The suite is hermetic: the end-to-end tests in `tests/cli.rs` drive the built
+binary with `XDG_CONFIG_HOME` pointed at a scratch directory and the provider
+variables stripped from the child environment, so they neither reach the network
+nor depend on whoever runs them having keys exported.
 
 Then check the output against the vendor consoles —
 [MiniMax](https://platform.minimax.io/console/usage) and
