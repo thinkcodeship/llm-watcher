@@ -30,6 +30,21 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Days in month `m` of year `y`.
+///
+/// `days_from_civil` is a closed-form formula that validates nothing, so an
+/// impossible day rolls over into a real date rather than failing: Feb 31 comes
+/// back as Mar 3. Bounding the day here is what keeps that from becoming a
+/// silently wrong instant.
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        _ => 28,
+    }
+}
+
 /// Parse an RFC 3339 timestamp into milliseconds since the Unix epoch.
 ///
 /// Accepts the forms Anthropic actually emits — `Z`, `+00:00`, and fractional
@@ -57,7 +72,7 @@ pub fn to_epoch_ms(s: &str) -> Option<i64> {
     let (year, month, day) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (hour, minute, second) = (num(11..13)?, num(14..16)?, num(17..19)?);
 
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
         return None;
     }
     // 60 is a leap second: clamp onto :59 rather than discard the timestamp,
@@ -225,6 +240,43 @@ mod tests {
             "2026-08-14T14:40:00+1:00",
         ] {
             assert_eq!(to_epoch_ms(bad), None, "expected None for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_day_that_does_not_exist_in_its_month_is_rejected_not_rolled_over() {
+        // days_from_civil is a closed-form formula with no validation of its
+        // own, so Feb 31 silently becomes Mar 3 — a real instant three days
+        // from the one the server named. A guessed timestamp is exactly what
+        // this module promises not to produce.
+        for bad in [
+            "2026-02-29T00:00:00Z",
+            "2026-02-30T00:00:00Z",
+            "2026-02-31T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-06-31T00:00:00Z",
+            "2026-09-31T00:00:00Z",
+            "2026-11-31T00:00:00Z",
+            "2023-02-29T00:00:00Z",
+            "1900-02-29T00:00:00Z",
+        ] {
+            assert_eq!(to_epoch_ms(bad), None, "expected None for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_last_real_day_of_every_month_still_parses() {
+        // The guard must reject impossible days without eating legitimate
+        // month ends, including the leap day in a year that has one.
+        for good in [
+            "2026-01-31T00:00:00Z",
+            "2026-02-28T00:00:00Z",
+            "2024-02-29T00:00:00Z",
+            "2000-02-29T00:00:00Z",
+            "2026-04-30T00:00:00Z",
+            "2026-12-31T00:00:00Z",
+        ] {
+            assert!(to_epoch_ms(good).is_some(), "expected Some for {good:?}");
         }
     }
 
