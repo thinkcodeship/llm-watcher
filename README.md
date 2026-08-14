@@ -206,6 +206,13 @@ instead of either window.
 `scoped` is the list of per-model weekly caps. It is omitted entirely when the
 provider has none, so existing consumers are unaffected.
 
+`degraded` appears only when one window failed to parse while the account
+otherwise reported fine. The row still carries usable numbers; `degraded` says
+why the missing window is missing, since an omitted window otherwise looks
+exactly like one the provider never sends. It is absent when nothing was lost,
+so existing consumers are unaffected. In table mode the same text goes to
+stderr, keeping stdout pipeable and the table one line per account.
+
 ```json
 [
   {
