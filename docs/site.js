@@ -71,34 +71,8 @@
     });
   });
 
-  /* ── reveals ─────────────────────────────────────────────────────── */
-
-  // Only hide-then-reveal when the observer that un-hides is actually
-  // available. Otherwise the class is never added and nothing is hidden.
-  if (!("IntersectionObserver" in window)) return;
-
-  var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (reduced) return;
-
-  var targets = document.querySelectorAll(".reveal, .section, .rule, .colophon__inner");
-  if (!targets.length) return;
-
-  root.classList.add("js");
-
-  var observer = new IntersectionObserver(function (entries) {
-    entries.forEach(function (entry) {
-      if (!entry.isIntersecting) return;
-      entry.target.classList.add("is-in");
-      observer.unobserve(entry.target);
-    });
-  }, { rootMargin: "0px 0px -8% 0px", threshold: 0.05 });
-
-  Array.prototype.forEach.call(targets, function (el) { observer.observe(el); });
-
-  // Backstop: whatever the observer misses is shown anyway. A page that
-  // hides its own content on a bad viewport is worse than one that never
-  // animates.
-  setTimeout(function () {
-    Array.prototype.forEach.call(targets, function (el) { el.classList.add("is-in"); });
-  }, 2500);
+  /* No scroll reveal lives here on purpose. The hero entrance is a pure
+     CSS animation, so nothing on this page depends on this file to become
+     visible — the worst a failure here can do is leave the theme on the
+     system default and the copy buttons inert. */
 })();

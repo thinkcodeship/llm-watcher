@@ -108,15 +108,26 @@ Sections, in order:
 
 ## Motion
 
-Restraint is the rule. One orchestrated entrance: hero elements fade and rise
-8px on a 60ms stagger. Section content reveals once on scroll via
-`IntersectionObserver`. Hairlines draw from the left over 600ms. Pace bars fill
-when scrolled into view.
+Restraint is the rule, and the rule has teeth: **motion may never be the reason
+something is invisible.**
 
-Everything is `transform`/`opacity` only, all of it inside
-`@media (prefers-reduced-motion: no-preference)`. With reduced motion requested
-the page renders complete and static — the reveal never gates content, so a
-failed observer or a blocked script leaves nothing hidden.
+There is exactly one animation. Hero elements fade and rise 8px on a 60ms
+stagger, as a pure CSS `@keyframes` with `animation-fill-mode: both`, inside
+`@media (prefers-reduced-motion: no-preference)`. Fill mode means the engine
+owns both ends of the animation, so an element is hidden only while the
+animation that reveals it is already running. Nothing below the fold is hidden
+at all — every section, table and the footer render at full opacity from first
+paint, with no class, script or observer involved.
+
+An earlier version was cleverer and wrong: it set `opacity: 0` on every section
+and on the footer, then relied on an `IntersectionObserver` (with a `setTimeout`
+backstop) to put them back. It stranded the footer — the Kanshiro LLC line
+included — in a real browser. The backstop fired and the class landed; the
+content still did not appear. A fade is not worth a page that can eat its own
+copyright notice, so the whole mechanism was removed rather than patched.
+
+The rule this leaves behind, for whoever changes this next: **if a rule hides
+content, the thing that un-hides it must be the CSS engine, not JavaScript.**
 
 ## Accessibility
 
@@ -131,6 +142,10 @@ failed observer or a blocked script leaves nothing hidden.
   selectable if the Clipboard API is unavailable or denied.
 - Focus is always visible: a 2px vermilion ring with offset, never removed.
 - Decorative glyphs carry `aria-hidden`; the seal has a real label.
+- No content depends on `site.js`. With the script blocked or broken the page is
+  complete and readable; the worst that happens is the theme stays on the system
+  default and the copy buttons go inert. See Motion for why that is a hard rule
+  here rather than a nicety.
 
 ## Deployment contract
 

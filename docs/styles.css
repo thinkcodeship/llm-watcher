@@ -758,40 +758,28 @@ h2 {
 }
 
 /* ── motion ────────────────────────────────────────────────────────── */
-/* Content is complete without any of this: the reveal only ever
-   animates from a visible baseline once the class is applied by JS. */
+/* One entrance, above the fold, driven entirely by CSS.
+ *
+ * An element is hidden ONLY while an animation that reveals it is already
+ * running — `both` fill mode means the engine owns both ends, so there is
+ * no state where something is hidden waiting on a script. Nothing below
+ * the fold is hidden at all.
+ *
+ * The previous version hid every section and the footer at opacity 0 and
+ * relied on an IntersectionObserver to put them back. That strands real
+ * content whenever any link in that chain does not fire, which is what
+ * happened to the footer. A fade is not worth a page that can eat its own
+ * copyright notice. */
 
 @media (prefers-reduced-motion: no-preference) {
-  .js .reveal,
-  .js .section > *,
-  .js .colophon__inner > * {
-    opacity: 0;
-    transform: translateY(8px);
+  .reveal {
+    animation: rise 620ms var(--ease) var(--d, 0ms) both;
   }
-  .js .reveal.is-in,
-  .js .section.is-in > *,
-  .js .colophon__inner.is-in > * {
-    opacity: 1;
-    transform: none;
-    transition:
-      opacity 620ms var(--ease) var(--d, 0ms),
-      transform 620ms var(--ease) var(--d, 0ms);
-  }
+}
 
-  .js .section.is-in > *:nth-child(1) { --d: 0ms; }
-  .js .section.is-in > *:nth-child(2) { --d: 60ms; }
-  .js .section.is-in > *:nth-child(3) { --d: 120ms; }
-  .js .section.is-in > *:nth-child(4) { --d: 180ms; }
-  .js .section.is-in > *:nth-child(n+5) { --d: 240ms; }
-
-  .js .rule { transform: scaleX(0); }
-  .js .rule.is-in { transform: scaleX(1); transition: transform 700ms var(--ease); }
-
-  .js .anatomy__stem { transform: scaleY(0); }
-  .js .is-in .anatomy__stem { transform: scaleY(1); transition: transform 520ms var(--ease) 220ms; }
-
-  .js .pace__fill { transform: scaleX(0); transform-origin: left center; }
-  .js .is-in .pace__fill { transform: scaleX(1); transition: transform 900ms var(--ease) 160ms; }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
 }
 
 @media print {
