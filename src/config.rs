@@ -58,8 +58,12 @@ impl Account {
     /// token carries an expiry that is worth naming before the request is sent.
     pub fn key(&self, now_ms: i64) -> Result<String> {
         match &self.credential {
+            // Trimmed for the reason `credentials::from_env` trims: a token
+            // pasted in, or produced by `$(cat …)`, carries a trailing newline,
+            // and a newline cannot go into an Authorization header. Both paths
+            // to CLAUDE_CODE_OAUTH_TOKEN must agree about this.
             CredentialRef::Env(name) => match std::env::var(name) {
-                Ok(v) if !v.trim().is_empty() => Ok(v),
+                Ok(v) if !v.trim().is_empty() => Ok(v.trim().to_string()),
                 _ => Err(anyhow!("{name} is not set in the environment")),
             },
             CredentialRef::ClaudeCode(path) => {
@@ -571,5 +575,23 @@ mod tests {
         let key = account.key(0);
         std::env::remove_var("LLM_WATCHER_TEST_SET_VAR");
         assert_eq!(key.unwrap(), "sk-secret");
+    }
+
+    #[test]
+    fn a_key_variable_with_surrounding_whitespace_is_trimmed() {
+        // `export CLAUDE_CODE_OAUTH_TOKEN=$(cat token.txt)` is the ordinary way
+        // to supply one, and the trailing newline it brings cannot go into an
+        // Authorization header. `credentials::from_env` already trims for this
+        // reason; the two paths to the same variable must not disagree.
+        let account = Account {
+            name: "ci".into(),
+            provider: Provider::Anthropic,
+            credential: CredentialRef::Env("LLM_WATCHER_TEST_NEWLINE_VAR".into()),
+        };
+        // Safety: this variable is used by no other test in the binary.
+        std::env::set_var("LLM_WATCHER_TEST_NEWLINE_VAR", "sk-ant-oat01-x\n");
+        let key = account.key(0);
+        std::env::remove_var("LLM_WATCHER_TEST_NEWLINE_VAR");
+        assert_eq!(key.unwrap(), "sk-ant-oat01-x");
     }
 }
