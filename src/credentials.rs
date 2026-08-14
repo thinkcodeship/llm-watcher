@@ -28,7 +28,6 @@ pub const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 pub const NO_KEYCHAIN_ENV: &str = "LLM_WATCHER_NO_KEYCHAIN";
 
 /// Keychain service name Claude Code stores its credential document under.
-#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
 /// Whether [`NO_KEYCHAIN_ENV`] switches the Keychain lookup off.
@@ -217,16 +216,50 @@ fn from_env(name: &str) -> Result<String> {
     }
 }
 
+/// Interpret a finished `security find-generic-password` invocation.
+///
+/// Split from the call itself so the mapping is testable: the invocation is
+/// macOS-only, but deciding what its exit status and stderr mean is not.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn interpret_keychain_output(
+    success: bool,
+    status: &str,
+    stdout: Vec<u8>,
+    stderr: &[u8],
+) -> Result<String> {
+    if success {
+        // Not `from_utf8_lossy`: replacement characters would reach
+        // `parse_store` as valid UTF-8 and be reported as malformed JSON, one
+        // layer below where the problem actually is.
+        return String::from_utf8(stdout)
+            .map_err(|e| anyhow!("the macOS Keychain returned non-UTF-8 bytes: {e}"));
+    }
+    // A denied access prompt, a locked login keychain, a corrupt keychain and a
+    // genuinely absent item all exit non-zero. Only the last is fixed by
+    // logging in again, so `security`'s own diagnosis is carried through rather
+    // than replaced by a guess at which of them happened.
+    let stderr = String::from_utf8_lossy(stderr);
+    let detail = stderr.trim();
+    Err(anyhow!(
+        "could not read {KEYCHAIN_SERVICE:?} from the macOS Keychain ({status}{}{}) \
+         — if the item is simply absent, run `claude` to log in",
+        if detail.is_empty() { "" } else { ": " },
+        detail
+    ))
+}
+
 #[cfg(target_os = "macos")]
 fn keychain_store() -> Option<Result<String>> {
     let output = std::process::Command::new("security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
         .output();
     Some(match output {
-        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
-        Ok(_) => Err(anyhow!(
-            "the macOS Keychain has no {KEYCHAIN_SERVICE:?} entry — run `claude` to log in"
-        )),
+        Ok(out) => interpret_keychain_output(
+            out.status.success(),
+            &out.status.to_string(),
+            out.stdout,
+            &out.stderr,
+        ),
         Err(e) => Err(anyhow!("could not run `security`: {e}")),
     })
 }
@@ -258,6 +291,42 @@ mod tests {
         assert!(!blank, "a blank value must leave the Keychain enabled");
         assert!(set, "a non-empty value must switch the Keychain off");
         assert!(!keychain_disabled(), "removal must restore the default");
+    }
+
+    #[test]
+    fn a_failed_keychain_lookup_carries_the_reason_security_gave() {
+        // A denied access prompt, a locked login keychain and a genuinely
+        // absent item all exit non-zero, and only the last is fixed by logging
+        // in again. Reporting them all as "no entry" sends the other two around
+        // a loop that cannot terminate, with the real diagnosis discarded.
+        let err = interpret_keychain_output(
+            false,
+            "exit status: 36",
+            Vec::new(),
+            b"SecKeychainSearchCopyNext: User interaction is not allowed.\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("exit status: 36"), "{err}");
+        assert!(err.contains("User interaction is not allowed"), "{err}");
+    }
+
+    #[test]
+    fn a_keychain_document_that_is_not_utf8_is_named_as_such() {
+        // from_utf8_lossy would substitute U+FFFD and hand parse_store a string
+        // that is valid UTF-8 but not valid JSON, reporting a byte-level
+        // problem as a malformed credential store one layer too late.
+        let err = interpret_keychain_output(true, "exit status: 0", vec![0xff, 0xfe], b"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn a_successful_keychain_lookup_returns_the_document_unchanged() {
+        let text =
+            interpret_keychain_output(true, "exit status: 0", b"{\"a\":1}".to_vec(), b"").unwrap();
+        assert_eq!(text, "{\"a\":1}");
     }
 
     fn store(expires_at: i64) -> String {
