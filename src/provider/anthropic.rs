@@ -92,12 +92,30 @@ struct Model {
 /// Anthropic reports only the reset, so the start is one span back from it. With
 /// no reset time the window has no boundaries and therefore no pace signal —
 /// usage still reports.
-fn window(used_percent: f64, resets_at: Option<&str>, span_ms: i64) -> Window {
-    let end = resets_at.and_then(rfc3339::to_epoch_ms);
-    match end {
-        Some(end) => Window::new(used_percent, Some(end - span_ms), Some(end)),
-        None => Window::new(used_percent, None, None),
+fn window(used_percent: f64, resets_at: Option<&str>, span_ms: i64) -> Result<Window> {
+    match resets_at {
+        None => Ok(Window::new(used_percent, None, None)),
+        // Present but unreadable is a shape change, not an absent window. Both
+        // used to collapse to the same boundary-less window, which renders as
+        // the very `--` a healthy freshly-reset window shows — so a changed
+        // timestamp format would have read as normal operation indefinitely.
+        Some(text) => {
+            let end = rfc3339::to_epoch_ms(text)
+                .ok_or_else(|| anyhow!("Anthropic sent an unreadable reset time {text:?}"))?;
+            Ok(Window::new(used_percent, Some(end - span_ms), Some(end)))
+        }
     }
+}
+
+/// A window from the pre-`limits` scalar shape, when it carries a utilization.
+fn scalar_window(scalar: Option<&Scalar>, span_ms: i64) -> Result<Option<Window>> {
+    let Some(scalar) = scalar else {
+        return Ok(None);
+    };
+    let Some(used) = scalar.utilization else {
+        return Ok(None);
+    };
+    Ok(Some(window(used, scalar.resets_at.as_deref(), span_ms)?))
 }
 
 /// Window length for a limit group.
@@ -155,48 +173,22 @@ pub fn parse(body: &str) -> Result<Usage> {
             (group, Some(label)) => scoped.push(ScopedWindow {
                 label,
                 window: match span_for(group) {
-                    Some(span) => window(percent, resets_at, span),
+                    Some(span) => window(percent, resets_at, span)?,
                     None => Window::new(percent, None, None),
                 },
             }),
-            ("session", None) => interval = Some(window(percent, resets_at, SESSION_MS)),
-            ("weekly", None) => weekly = Some(window(percent, resets_at, WEEKLY_MS)),
+            ("session", None) => interval = Some(window(percent, resets_at, SESSION_MS)?),
+            ("weekly", None) => weekly = Some(window(percent, resets_at, WEEKLY_MS)?),
             _ => {}
         }
     }
 
     // Fall back to the scalar fields for responses that predate `limits`.
     if interval.is_none() {
-        interval = response
-            .five_hour
-            .as_ref()
-            .and_then(|s| s.utilization)
-            .map(|used| {
-                window(
-                    used,
-                    response
-                        .five_hour
-                        .as_ref()
-                        .and_then(|s| s.resets_at.as_deref()),
-                    SESSION_MS,
-                )
-            });
+        interval = scalar_window(response.five_hour.as_ref(), SESSION_MS)?;
     }
     if weekly.is_none() {
-        weekly = response
-            .seven_day
-            .as_ref()
-            .and_then(|s| s.utilization)
-            .map(|used| {
-                window(
-                    used,
-                    response
-                        .seven_day
-                        .as_ref()
-                        .and_then(|s| s.resets_at.as_deref()),
-                    WEEKLY_MS,
-                )
-            });
+        weekly = scalar_window(response.seven_day.as_ref(), WEEKLY_MS)?;
     }
 
     if interval.is_none() && weekly.is_none() && scoped.is_empty() {
@@ -272,6 +264,28 @@ mod tests {
             window.end_ms.unwrap() - window.start_ms.unwrap(),
             5 * 3_600_000
         );
+    }
+
+    #[test]
+    fn an_unreadable_reset_time_is_an_error_not_a_window_without_a_pace() {
+        // A changed timestamp format must not read as "just reset": that is the
+        // same `--` a healthy fresh window shows, so it would go unnoticed
+        // forever. Absent is a window without pace; unreadable is an error.
+        let body = r#"{"limits":[
+            {"kind":"session","group":"session","percent":4,
+             "resets_at":"1786718400","scope":null}
+        ]}"#;
+        let err = parse(body).unwrap_err().to_string();
+        assert!(err.contains("1786718400"), "{err}");
+    }
+
+    #[test]
+    fn an_unreadable_reset_time_in_the_scalar_fallback_is_also_an_error() {
+        // The legacy shape gets the same treatment; it is the older of the two
+        // and therefore the likelier one to drift.
+        let body = r#"{"five_hour":{"utilization":9,"resets_at":"not a timestamp"}}"#;
+        let err = parse(body).unwrap_err().to_string();
+        assert!(err.contains("not a timestamp"), "{err}");
     }
 
     #[test]
