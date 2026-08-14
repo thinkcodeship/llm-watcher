@@ -4,3 +4,30 @@
 
 # Never commit a captured response that still holds a key or account id.
 /scratch
+
+# Claude Code local settings (machine-specific; .claude/hooks stays tracked)
+.claude/settings.local.json
+
+# Environment
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.directory
+.Trash-*
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
