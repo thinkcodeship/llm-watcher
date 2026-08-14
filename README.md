@@ -125,6 +125,11 @@ Claude Code already put it, in this order:
 2. `$CLAUDE_CONFIG_DIR/.credentials.json`, else `~/.claude/.credentials.json`.
 3. The macOS Keychain (`Claude Code-credentials`).
 
+Setting `LLM_WATCHER_NO_KEYCHAIN` to any non-empty value skips step 3. The first
+two steps follow environment variables, so a sandbox can point them at a scratch
+directory; the Keychain follows neither, and this is the switch that keeps it out
+of a run that is meant to be isolated. The test suite sets it for that reason.
+
 The store is **only ever read**. The token expires within hours, and refreshing it
 would mean writing that file back — racing a running Claude Code session and
 risking the refresh token it depends on. An expired token is reported as expired,

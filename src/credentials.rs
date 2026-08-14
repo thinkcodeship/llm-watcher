@@ -19,9 +19,26 @@ use std::path::PathBuf;
 /// Environment variable holding a raw token, as written by `claude setup-token`.
 pub const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
+/// Set to any non-empty value to skip the Keychain lookup entirely.
+///
+/// The other two sources can be redirected by environment — [`TOKEN_ENV`] holds
+/// a token directly, and the store path follows `CLAUDE_CONFIG_DIR` or `HOME`.
+/// The Keychain follows neither, so without this a test harness on macOS
+/// resolves the developer's real credentials and queries the live endpoint.
+pub const NO_KEYCHAIN_ENV: &str = "LLM_WATCHER_NO_KEYCHAIN";
+
 /// Keychain service name Claude Code stores its credential document under.
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Whether [`NO_KEYCHAIN_ENV`] switches the Keychain lookup off.
+///
+/// Deliberately not `cfg`-gated: the Keychain call it guards only exists on
+/// macOS, but the decision itself is platform-independent and therefore
+/// testable everywhere.
+fn keychain_disabled() -> bool {
+    std::env::var_os(NO_KEYCHAIN_ENV).is_some_and(|v| !v.is_empty())
+}
 
 /// Which Claude Code credential store to read.
 ///
@@ -171,10 +188,16 @@ fn resolve_default(now_ms: i64) -> Result<Credential> {
         }
     }
 
-    match keychain_store() {
-        Some(Ok(text)) => return parse_store(&text, now_ms).context("reading the macOS Keychain"),
-        Some(Err(e)) if failure.is_none() => failure = Some(e),
-        _ => {}
+    // Skipped wholesale when switched off, so a harness that has redirected the
+    // other two sources is not silently answered by the real login.
+    if !keychain_disabled() {
+        match keychain_store() {
+            Some(Ok(text)) => {
+                return parse_store(&text, now_ms).context("reading the macOS Keychain")
+            }
+            Some(Err(e)) if failure.is_none() => failure = Some(e),
+            _ => {}
+        }
     }
 
     Err(failure.unwrap_or_else(|| {
@@ -218,6 +241,24 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_786_718_400_000;
+
+    #[test]
+    fn the_keychain_is_switched_off_by_a_non_empty_value_only() {
+        // The Keychain is the one source no scratch directory can redirect, so
+        // the tests/cli.rs harness switches it off outright. A blank value must
+        // not count, or an accidentally-exported empty variable would silently
+        // disable the real lookup for a user.
+        // Safety: this variable is used by no other test in the binary.
+        assert!(!keychain_disabled(), "must default to enabled");
+        std::env::set_var(NO_KEYCHAIN_ENV, "");
+        let blank = keychain_disabled();
+        std::env::set_var(NO_KEYCHAIN_ENV, "1");
+        let set = keychain_disabled();
+        std::env::remove_var(NO_KEYCHAIN_ENV);
+        assert!(!blank, "a blank value must leave the Keychain enabled");
+        assert!(set, "a non-empty value must switch the Keychain off");
+        assert!(!keychain_disabled(), "removal must restore the default");
+    }
 
     fn store(expires_at: i64) -> String {
         format!(

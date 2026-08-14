@@ -66,7 +66,12 @@ fn run(scratch: &Scratch, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", scratch.path())
         // HOME is the fallback base; pinning it stops a missing XDG from
         // reaching the developer's real config.
-        .env("HOME", scratch.path());
+        .env("HOME", scratch.path())
+        // The macOS Keychain follows neither XDG_CONFIG_HOME nor HOME, so it is
+        // the one credential source a scratch directory cannot redirect. Left
+        // on, a developer logged into Claude Code would have these tests
+        // resolve their real token and query the live endpoint.
+        .env("LLM_WATCHER_NO_KEYCHAIN", "1");
     for var in PROVIDER_VARS {
         command.env_remove(var);
     }
