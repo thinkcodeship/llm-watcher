@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-watcher — am I burning this coding plan too fast?</title>
+<meta name="description" content="A single-shot command that reports quota burn rate across MiniMax, Z.ai/GLM and Anthropic coding plans. No daemon, no database, no port.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="seal.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<meta property="og:title" content="llm-watcher">
+<meta property="og:description" content="Am I burning this coding plan too fast? Runs, prints, exits.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://thinkcodeship.github.io/llm-watcher/">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="masthead">
+  <a class="brand" href="./">
+    <span class="seal seal--sm" aria-hidden="true"><span class="seal__mark">監視</span></span>
+    <span class="brand__name">llm-watcher</span>
+  </a>
+  <nav class="masthead__nav" aria-label="Sections">
+    <a href="#read">Reading a row</a>
+    <a href="#install">Install</a>
+    <a href="#providers">Providers</a>
+    <a href="https://github.com/thinkcodeship/llm-watcher">GitHub</a>
+  </nav>
+  <button class="theme-toggle" type="button" data-theme-toggle aria-pressed="false">
+    <span class="theme-toggle__glyph" aria-hidden="true"></span>
+    <span class="theme-toggle__label">Dark</span>
+  </button>
+</header>
+
+<main id="main">
+
+  <!-- ── hero ───────────────────────────────────────────────────────── -->
+  <section class="hero">
+    <div class="hero__mark reveal" style="--d:0ms">
+      <span class="seal" aria-hidden="true"><span class="seal__mark">監視</span></span>
+      <span class="hero__eyebrow">kanshi &middot; to watch</span>
+    </div>
+
+    <h1 class="hero__title reveal" style="--d:60ms">llm-watcher</h1>
+
+    <p class="hero__lede reveal" style="--d:120ms">
+      Answers one question: <em>am I burning this coding plan too fast?</em>
+    </p>
+
+    <figure class="terminal reveal" style="--d:180ms">
+      <figcaption class="terminal__cap">One run against three providers</figcaption>
+      <div class="terminal__body">
+<pre><code><span class="t-dim">PLAN         5H WINDOW                        WEEKLY</span>
+minimax        4% used   <span class="t-ok">0.1x</span>  resets 1h 57m   49% used   <span class="t-ok">0.8x</span>  resets 2d 10h
+minimax-max    4% used   <span class="t-ok">0.1x</span>  resets 1h 57m   39% used   <span class="t-ok">0.6x</span>  resets 2d 10h
+glm            0% used     <span class="t-dim">--</span>                  20% used   <span class="t-ok">0.5x</span>  resets 4d 10h
+claude        10% used   <span class="t-ok">0.1x</span>  resets 1h 37m   80% used   <span class="t-warn">1.3x</span>  resets 2d 14h
+  └ Fable                                      61% used   <span class="t-warn">1.0x</span>  resets 2d 14h</code></pre>
+      </div>
+    </figure>
+
+    <div class="hero__cta reveal" style="--d:240ms">
+      <div class="cmd">
+        <code class="cmd__text">cargo install --path .</code>
+        <button class="cmd__copy" type="button" data-copy="cargo install --path .">Copy</button>
+      </div>
+      <a class="link-arrow" href="https://github.com/thinkcodeship/llm-watcher">Source on GitHub</a>
+    </div>
+
+    <p class="hero__note reveal" style="--d:300ms">
+      Runs, prints, exits.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── reading a row ──────────────────────────────────────────────── -->
+  <section id="read" class="section">
+    <p class="eyebrow">01</p>
+    <h2>Reading a row</h2>
+    <p class="lede">
+      Every plan gets at least two windows — the rolling five-hour cap and the
+      weekly cap. Each window prints the same three things.
+    </p>
+
+    <div class="anatomy" role="group" aria-label="Anatomy of one window reading">
+      <div class="anatomy__part">
+        <p class="anatomy__frag">49% used</p>
+        <span class="anatomy__stem" aria-hidden="true"></span>
+        <h3 class="anatomy__label">Share spent</h3>
+        <p class="anatomy__note">How much of this window&rsquo;s quota is already gone.</p>
+      </div>
+      <div class="anatomy__part">
+        <p class="anatomy__frag">0.8x</p>
+        <span class="anatomy__stem" aria-hidden="true"></span>
+        <h3 class="anatomy__label">Pace</h3>
+        <p class="anatomy__note">Quota spent measured against clock elapsed.</p>
+      </div>
+      <div class="anatomy__part">
+        <p class="anatomy__frag">resets 2d 13h</p>
+        <span class="anatomy__stem" aria-hidden="true"></span>
+        <h3 class="anatomy__label">Countdown</h3>
+        <p class="anatomy__note">How long until this window rolls over.</p>
+      </div>
+    </div>
+
+    <p class="aside">
+      Countdowns show the two largest units with zeros dropped — <code>2d 13h</code>,
+      <code>45m</code>, plain <code>7d</code> for a week untouched. Minutes
+      remaining in a two-day window is not a number anyone acts on, so it is not
+      shown.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── pace ───────────────────────────────────────────────────────── -->
+  <section id="pace" class="section">
+    <p class="eyebrow">02</p>
+    <h2>Pace</h2>
+    <p class="lede">
+      Providers report quota in incompatible units, so raw numbers do not
+      compare. Pace normalises them.
+    </p>
+
+    <p class="formula"><span>pace</span> = fraction of quota consumed &divide; fraction of window elapsed</p>
+
+    <ul class="paces">
+      <li class="pace pace--ok">
+        <div class="pace__head">
+          <span class="pace__value">0.7x</span>
+          <span class="pace__verdict">Headroom remains</span>
+        </div>
+        <div class="pace__track" style="--fill:35%; --elapsed:50%">
+          <span class="pace__fill"></span>
+          <span class="pace__tick" aria-hidden="true"></span>
+        </div>
+        <p class="pace__caption">Half the window gone, a third of the quota gone.</p>
+      </li>
+      <li class="pace pace--warn">
+        <div class="pace__head">
+          <span class="pace__value">1.0x</span>
+          <span class="pace__verdict">Exactly on budget</span>
+        </div>
+        <div class="pace__track" style="--fill:50%; --elapsed:50%">
+          <span class="pace__fill"></span>
+          <span class="pace__tick" aria-hidden="true"></span>
+        </div>
+        <p class="pace__caption">Quota lands precisely as the window resets.</p>
+      </li>
+      <li class="pace pace--over">
+        <div class="pace__head">
+          <span class="pace__value">1.6x</span>
+          <span class="pace__verdict">Exhausts before reset</span>
+        </div>
+        <div class="pace__track" style="--fill:80%; --elapsed:50%">
+          <span class="pace__fill"></span>
+          <span class="pace__tick" aria-hidden="true"></span>
+        </div>
+        <p class="pace__caption">Four fifths spent at the halfway mark.</p>
+      </li>
+    </ul>
+    <p class="legend">The notch marks how much of the window has elapsed; the bar is how much quota is gone.</p>
+
+    <p class="aside">
+      <code>--</code> means there is no honest signal yet: a window that just
+      reset, or one whose boundaries the provider did not report. A fabricated
+      ratio there reads as an emergency, so none is printed.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── restraint ──────────────────────────────────────────────────── -->
+  <section id="restraint" class="section">
+    <p class="eyebrow">03</p>
+    <h2>What it does not do</h2>
+    <p class="lede">The absences are the point.</p>
+    <ul class="absences">
+      <li><span class="absences__no" aria-hidden="true">—</span> No daemon</li>
+      <li><span class="absences__no" aria-hidden="true">—</span> No database</li>
+      <li><span class="absences__no" aria-hidden="true">—</span> No listening port</li>
+      <li><span class="absences__no" aria-hidden="true">—</span> No background process</li>
+      <li><span class="absences__no" aria-hidden="true">—</span> Nothing written into <code>~/.claude/</code></li>
+    </ul>
+    <p>
+      The Claude credential store is read, never modified. API keys are
+      referenced by environment variable name and read at runtime — never stored
+      in the config, never accepted as a command-line argument, because
+      <code>argv</code> is visible in <code>ps</code> and lands in shell history.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── install ────────────────────────────────────────────────────── -->
+  <section id="install" class="section">
+    <p class="eyebrow">04</p>
+    <h2>Install</h2>
+
+    <div class="cmd cmd--block">
+      <code class="cmd__text">cargo install --path .</code>
+      <button class="cmd__copy" type="button" data-copy="cargo install --path .">Copy</button>
+    </div>
+
+    <h3 class="sub">Usage</h3>
+    <div class="code-block">
+<pre><code>llm-watcher                            <span class="t-dim"># table</span>
+llm-watcher --json                     <span class="t-dim"># machine-readable</span>
+llm-watcher --account minimax-max      <span class="t-dim"># one plan (repeatable)</span>
+llm-watcher --threshold 1.5            <span class="t-dim"># exit 1 at or past 1.5x</span>
+llm-watcher --no-color</code></pre>
+    </div>
+
+    <h3 class="sub">Configure</h3>
+    <p>
+      With no config file it falls back to <code>MINIMAX_API_KEY</code>,
+      <code>MINIMAX_MAX_API_KEY</code> and <code>ZHIPU_API_KEY</code> /
+      <code>ZAI_API_KEY</code>, so it works before you write anything. If Claude
+      Code is logged in on this machine, a <code>claude</code> row appears too —
+      no variable needed, because a Claude subscription has no API key to set.
+    </p>
+    <p>
+      For more than one account per provider — the case this tool exists for —
+      write <code>~/.config/llm-watcher/config.toml</code>:
+    </p>
+    <div class="code-block">
+<pre><code><span class="t-key">[[account]]</span>
+name     = <span class="t-str">"minimax-work"</span>
+provider = <span class="t-str">"minimax"</span>
+key_env  = <span class="t-str">"MINIMAX_API_KEY"</span>
+
+<span class="t-key">[[account]]</span>
+name     = <span class="t-str">"glm"</span>
+provider = <span class="t-str">"zai"</span>        <span class="t-dim"># aliases: glm, zhipu</span>
+key_env  = <span class="t-str">"ZHIPU_API_KEY"</span>
+
+<span class="t-key">[[account]]</span>
+name     = <span class="t-str">"claude"</span>
+provider = <span class="t-str">"anthropic"</span>  <span class="t-dim"># aliases: claude, claude-code</span>
+                        <span class="t-dim"># no key_env — the token comes</span>
+                        <span class="t-dim"># from Claude Code</span></code></pre>
+    </div>
+
+    <h3 class="sub">Exit codes</h3>
+    <table class="table">
+      <thead><tr><th scope="col">Code</th><th scope="col">Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>0</code></td><td>Ran fine</td></tr>
+        <tr><td><code>1</code></td><td><code>--threshold</code> was given and some window reached it</td></tr>
+        <tr><td><code>2</code></td><td>Every account failed, or the configuration is unusable</td></tr>
+      </tbody>
+    </table>
+    <p class="aside">
+      A single failing account does not abort the run — the error lands on its
+      own row and the other plans still report. <code>--threshold</code> plus
+      <code>--json</code> is enough for a cron job or a waybar module without any
+      of this needing a daemon.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── providers ──────────────────────────────────────────────────── -->
+  <section id="providers" class="section">
+    <p class="eyebrow">05</p>
+    <h2>Providers</h2>
+    <div class="table-scroll">
+      <table class="table table--providers">
+        <thead>
+          <tr><th scope="col">Provider</th><th scope="col">Endpoint</th><th scope="col">Auth</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>MiniMax Token Plan</td>
+            <td><code>GET api.minimax.io/v1/token_plan/remains</code></td>
+            <td><code>Authorization: Bearer &lt;key&gt;</code></td>
+          </tr>
+          <tr>
+            <td>Z.ai / GLM Coding Plan</td>
+            <td><code>GET api.z.ai/api/monitor/usage/quota/limit</code></td>
+            <td><code>Authorization: &lt;token&gt;</code> <strong class="warn-inline">no <code>Bearer</code> prefix</strong></td>
+          </tr>
+          <tr>
+            <td>Anthropic Claude<br><span class="muted">Pro, Max 5x, Max 20x</span></td>
+            <td><code>GET api.anthropic.com/api/oauth/usage</code></td>
+            <td><code>Authorization: Bearer &lt;OAuth token&gt;</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="aside">
+      The asymmetry in that last column is real, not a typo. Getting it backwards
+      produces a <code>401</code> that reads exactly like a bad key.
+    </p>
+    <p>
+      Anthropic&rsquo;s is the <em>subscription</em> surface, not the
+      pay-as-you-go API — the same data Claude Code&rsquo;s <code>/usage</code>
+      command shows. No provider documents its response body, so
+      <a href="https://github.com/thinkcodeship/llm-watcher#what-the-responses-actually-look-like">the
+      README records what was captured live</a>, with the real documents kept as
+      fixtures.
+    </p>
+    <p class="cta-line">
+      <a class="link-arrow" href="https://github.com/thinkcodeship/llm-watcher#readme">Read the full documentation</a>
+    </p>
+  </section>
+</main>
+
+<!-- ── footer ───────────────────────────────────────────────────────── -->
+<footer class="colophon">
+  <div class="colophon__inner">
+    <div class="colophon__brand">
+      <span class="seal seal--lg" aria-hidden="true"><span class="seal__mark">監視</span></span>
+      <div>
+        <p class="colophon__eyebrow">Built and maintained by</p>
+        <a class="colophon__company" href="https://thinkcodeship.com">Kanshiro LLC</a>
+        <p class="colophon__site">
+          <a href="https://thinkcodeship.com">thinkcodeship.com</a>
+        </p>
+      </div>
+    </div>
+
+    <div class="colophon__meta">
+      <p>
+        Released under the <a href="https://github.com/thinkcodeship/llm-watcher/blob/main/LICENSE">MIT License</a>.
+        <br>Copyright &copy; 2026 Kanshiro LLC.
+      </p>
+      <p class="colophon__links">
+        <a href="https://github.com/thinkcodeship/llm-watcher">Repository</a>
+        <span aria-hidden="true">&middot;</span>
+        <a href="https://github.com/thinkcodeship/llm-watcher/issues">Issues</a>
+      </p>
+      <p class="colophon__type">
+        Set in Zen Old Mincho and IBM Plex Mono, both self-hosted.
+        This page makes no third-party request.
+      </p>
+    </div>
+  </div>
+</footer>
+
+<div class="sr-only" aria-live="polite" data-copy-status></div>
+<script src="site.js" defer></script>
+</body>
+</html>
