@@ -8,17 +8,20 @@ Answers one question: **am I burning this coding plan too fast?**
 ```
 $ llm-watcher
 PLAN         5H WINDOW                        WEEKLY
-minimax        4% used   1.2x  resets 4h 50m   49% used   0.8x  resets 2d 13h
-minimax-max    0% used   0.0x  resets 4h 50m   38% used   0.6x  resets 2d 13h
-glm            0% used     --                  20% used   0.6x  resets 4d 13h
+minimax        4% used   0.1x  resets 1h 57m   49% used   0.8x  resets 2d 10h
+minimax-max    4% used   0.1x  resets 1h 57m   39% used   0.6x  resets 2d 10h
+glm            0% used     --                  20% used   0.5x  resets 4d 10h
+claude        10% used   0.1x  resets 1h 37m   80% used   1.3x  resets 2d 14h
+  └ Fable                                      61% used   1.0x  resets 2d 14h
 ```
 
 Runs, prints, exits. No daemon, no database, no listening port, no background
-process, and nothing written into `~/.claude/`.
+process, and nothing written into `~/.claude/` — the Claude credential store is
+read, never modified.
 
 ## Reading a row
 
-Every plan gets two windows — the rolling 5-hour cap and the weekly cap — and
+Every plan gets at least two windows — the rolling 5-hour cap and the weekly cap — and
 each window prints the same three things:
 
 ```
@@ -50,6 +53,21 @@ from `1.5x`.
 boundaries the provider did not report. A fabricated ratio there reads as an
 emergency, so none is printed.
 
+### Per-model caps
+
+An indented `└` row is a weekly cap that applies to one model rather than the
+whole plan:
+
+```
+claude        10% used   0.1x  resets 1h 37m   80% used   1.3x  resets 2d 14h
+  └ Fable                                      61% used   1.0x  resets 2d 14h
+```
+
+Anthropic Max plans carry one per restricted model, and it can run out before the
+all-model weekly does — so it is the row that tells you which limit will actually
+stop you. `--threshold` counts these too. Providers with a single shared weekly
+budget never print one.
+
 ### Countdowns
 
 Reset times show the two largest units, zeros dropped — `2d 13h`, `4h 50m`,
@@ -65,7 +83,9 @@ cargo install --path .
 ## Configure
 
 With no config file it falls back to `MINIMAX_API_KEY`, `MINIMAX_MAX_API_KEY`, and
-`ZHIPU_API_KEY` / `ZAI_API_KEY`, so it works before you write anything.
+`ZHIPU_API_KEY` / `ZAI_API_KEY`, so it works before you write anything. If Claude
+Code is logged in on this machine, a `claude` row appears too — no variable needed,
+because a Claude subscription has no API key to set.
 
 For more than one account per provider — the case this tool exists for — write
 `~/.config/llm-watcher/config.toml`:
@@ -85,11 +105,60 @@ key_env  = "MINIMAX_MAX_API_KEY"
 name     = "glm"
 provider = "zai"        # aliases: glm, zhipu
 key_env  = "ZHIPU_API_KEY"
+
+[[account]]
+name     = "claude"
+provider = "anthropic"  # aliases: claude, claude-code
+                        # no key_env — the token comes from Claude Code
 ```
 
-Keys are referenced by environment variable name and read at runtime. They are
+API keys are referenced by environment variable name and read at runtime. They are
 never stored in the config and never accepted as a command-line argument — argv is
 visible in `ps` and lands in shell history.
+
+### Anthropic credentials
+
+There is no API key for a Claude subscription, so the token is read from wherever
+Claude Code already put it, in this order:
+
+1. `CLAUDE_CODE_OAUTH_TOKEN` — as written by `claude setup-token`.
+2. `$CLAUDE_CONFIG_DIR/.credentials.json`, else `~/.claude/.credentials.json`.
+3. The macOS Keychain (`Claude Code-credentials`).
+
+Setting `LLM_WATCHER_NO_KEYCHAIN` to any non-empty value skips step 3. The first
+two steps follow environment variables, so a sandbox can point them at a scratch
+directory; the Keychain follows neither, and this is the switch that keeps it out
+of a run that is meant to be isolated. The test suite sets it for that reason.
+
+The store is **only ever read**. The token expires within hours, and refreshing it
+would mean writing that file back — racing a running Claude Code session and
+risking the refresh token it depends on. An expired token is reported as expired,
+with the fix, rather than silently retried:
+
+```
+claude  (the Claude Code OAuth token expired 3h ago — run any `claude` command to refresh it)
+```
+
+For a second Claude account, point an entry at its own store:
+
+```toml
+[[account]]
+name             = "claude-work"
+provider         = "anthropic"
+credentials_file = "~/.claude-work/.credentials.json"
+```
+
+On CI, where no store exists, put the token in a variable instead:
+
+```toml
+[[account]]
+name     = "claude-ci"
+provider = "anthropic"
+key_env  = "CLAUDE_CODE_OAUTH_TOKEN"
+```
+
+Setting both `key_env` and `credentials_file` is rejected rather than ranked — a
+silently-ignored line looks like it took effect.
 
 ## Usage
 
@@ -134,6 +203,18 @@ when the provider reports nothing for them, as are `pace` (no honest signal yet)
 and `resets_in_ms` (no boundary reported). A failed account carries `error`
 instead of either window.
 
+`scoped` is the list of per-model weekly caps. It is omitted entirely when the
+provider has none, so existing consumers are unaffected.
+
+`degraded` appears only when part of the response could not be read while the
+rest still parsed. The row keeps its numbers, and the string says what failed —
+an omitted window otherwise looks exactly like one the provider never sends. It
+reports the drift rather than promising a hole: a fallback may have recovered
+the window whose primary source failed, leaving the row complete. Absent on
+every healthy row and for every provider other than Anthropic, so existing
+consumers are unaffected. In table mode the same note goes to stderr, after the
+table, keeping stdout pipeable and the table one line per account.
+
 ```json
 [
   {
@@ -147,6 +228,15 @@ instead of either window.
     "provider": "zai",
     "interval": { "used_percent": 0.0 },
     "weekly":   { "used_percent": 20.0, "pace": 0.5542, "resets_in_ms": 386526994 }
+  },
+  {
+    "name": "claude",
+    "provider": "anthropic",
+    "interval": { "used_percent": 10.0, "pace": 0.1481, "resets_in_ms": 5847754 },
+    "weekly":   { "used_percent": 80.0, "pace": 1.2794, "resets_in_ms": 226647754 },
+    "scoped": [
+      { "label": "Fable", "used_percent": 61.0, "pace": 0.9756, "resets_in_ms": 226647754 }
+    ]
   }
 ]
 ```
@@ -159,28 +249,21 @@ instead of either window.
 |----------|----------|------|
 | MiniMax Token Plan | `GET https://api.minimax.io/v1/token_plan/remains` | `Authorization: Bearer <Subscription Key>` |
 | Z.ai / GLM Coding Plan | `GET https://api.z.ai/api/monitor/usage/quota/limit` | `Authorization: <token>` — **no `Bearer` prefix** |
+| Anthropic Claude (Pro, Max 5x, Max 20x) | `GET https://api.anthropic.com/api/oauth/usage` | `Authorization: Bearer <OAuth token>` |
 
 The asymmetry in that last column is real, not a typo. Getting it backwards
 produces a `401` that reads exactly like a bad key.
 
-### Anthropic Claude Max is not supported
-
-No public endpoint exists. It is an open feature request,
-[anthropics/claude-code#44328](https://github.com/anthropics/claude-code/issues/44328),
-asking for exactly this: usage across multiple Max accounts, outside an active
-session. Today the session cap, weekly cap and extra-usage balance live only in
-the Claude Code status bar while a session runs.
-
-The available workaround is to install a `statusLine` hook into
-`~/.claude/settings.json` and scrape the payload Claude Code pipes through it.
-This tool deliberately does not do that. Revisit if Anthropic ships an endpoint.
+Anthropic's is the *subscription* surface, not the pay-as-you-go API — no
+`x-api-key`, and no `anthropic-beta` header is required. It is the same data
+Claude Code's `/usage` command shows, so treat that as the reference.
 
 ## What the responses actually look like
 
-Neither provider documents its response body, and the third-party write-ups that
-do are inconsistent with each other. What follows was captured live on 2026-08-14
-from a MiniMax Max plan and a GLM Pro plan. Fixtures in `tests/fixtures/` are the
-real documents.
+No provider documents its response body, and the third-party write-ups that do
+are inconsistent with each other. What follows was captured live on 2026-08-14
+from a MiniMax Max plan, a GLM Pro plan, and a Claude Max 20x plan. Fixtures in
+`tests/fixtures/` are the real documents.
 
 <details>
 <summary><b>MiniMax</b> — percentages are inverted, and <code>remains_time</code> is a trap</summary>
@@ -259,29 +342,79 @@ number climbs (consumed) or falls (remaining). If it falls, invert it in
 
 </details>
 
+<details>
+<summary><b>Anthropic</b> — only a reset time, and unreleased feature flags to ignore</summary>
+
+```json
+{
+  "five_hour":  { "utilization": 4,  "resets_at": "2026-08-14T14:40:00.255510+00:00" },
+  "seven_day":  { "utilization": 78, "resets_at": "2026-08-17T04:00:00.255540+00:00" },
+  "seven_day_opus": null, "tangelo": null, "nimbus_quill": { "utilization": 0 },
+  "limits": [
+    { "kind": "session",       "group": "session", "percent": 4,
+      "resets_at": "2026-08-14T14:40:00.255510+00:00", "scope": null },
+    { "kind": "weekly_all",    "group": "weekly",  "percent": 78, "severity": "warning",
+      "resets_at": "2026-08-17T04:00:00.255540+00:00", "scope": null, "is_active": true },
+    { "kind": "weekly_scoped", "group": "weekly",  "percent": 61,
+      "resets_at": "2026-08-17T04:00:00.255822+00:00",
+      "scope": { "model": { "display_name": "Fable" } } }
+  ],
+  "extra_usage": { "is_enabled": false }, "spend": { "percent": 0 }
+}
+```
+
+- `percent` / `utilization` is **consumed**, the same direction as Z.ai and the
+  opposite of MiniMax. Nothing is inverted here.
+- Timestamps are **RFC 3339 strings**, not epoch milliseconds like the other two.
+  Converted in `src/rfc3339.rs`, which rejects a timestamp with no UTC offset —
+  assuming local time would make the pace depend on the reader's `$TZ`.
+- Only `resets_at` is given, never the start. The start is one span back: 5 hours
+  for `session`, 7 days for both weekly windows.
+- `limits[]` is preferred over the `five_hour` / `seven_day` scalars because it
+  also carries the per-model cap. Entries are slotted on `group` plus whether
+  `scope` is set — keying on `kind` would drop a window the moment Anthropic adds
+  one, and keying on `group` alone would let the scoped cap overwrite the
+  all-model weekly.
+- **A bad or absent token answers `429`, not `401`.** Status code alone cannot
+  distinguish "rate limited" from "log in again", which is why an expired token is
+  caught from `expiresAt` before the request is ever sent.
+- Fields named after unreleased features — `tangelo`, `nimbus_quill`,
+  `cinder_cove`, `iguana_necktie`, `amber_ladder`, `omelette*` — are deliberately
+  not parsed. They churn, and guessing at one invents a window that does not exist.
+
+`seven_day_opus` and `seven_day_sonnet` exist as scalars but read `null` on this
+plan; the per-model cap arrives through `weekly_scoped` instead, which is why the
+scoped windows are a list rather than a single field.
+
+</details>
+
 ## Verify
 
 ```bash
-cargo test                          # 121 tests, no network
+cargo test                          # 184 tests, no network
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
 The suite is hermetic: the end-to-end tests in `tests/cli.rs` drive the built
-binary with `XDG_CONFIG_HOME` pointed at a scratch directory and the provider
-variables stripped from the child environment, so they neither reach the network
-nor depend on whoever runs them having keys exported.
+binary with `XDG_CONFIG_HOME` **and `HOME`** pointed at a scratch directory and
+every provider variable stripped from the child environment, so they neither reach
+the network nor depend on whoever runs them having keys exported. Pinning `HOME`
+is what hides a real `~/.claude/.credentials.json` from the Anthropic fallback —
+without it, `cargo test` on a logged-in machine would query the live endpoint.
 
-Then check the output against the vendor consoles —
-[MiniMax](https://platform.minimax.io/console/usage) and
-[Z.ai](https://z.ai) — because the console is the reference, not this table.
+Then check the output against the vendor surfaces —
+[MiniMax](https://platform.minimax.io/console/usage), [Z.ai](https://z.ai), and
+Claude Code's own `/usage` — because those are the reference, not this table.
 
-Two things worth confirming on a live run:
+Three things worth confirming on a live run:
 
 1. The two MiniMax rows show **different** numbers. Identical rows mean both
    accounts resolved to the same key, which is how a single `MINIMAX_API_KEY`
    variable silently tracks one plan while claiming to cover both.
 2. Run twice ~10 minutes apart with no activity in between. Usage should not move.
+3. The `claude` row matches `/usage` in Claude Code, and its `└` sub-row matches
+   the per-model figure shown there.
 
 ## License
 

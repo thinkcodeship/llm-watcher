@@ -4,6 +4,7 @@
 //! convention, and its own idea of which direction a percentage points. Adapters
 //! normalize all of that into [`Usage`] before anything else sees it.
 
+pub mod anthropic;
 pub mod minimax;
 pub mod zai;
 
@@ -17,10 +18,48 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// Normalized quota state for one account.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
-    /// The short rolling window (5 hours on both providers today).
+    /// The short rolling window (5 hours on every provider today).
     pub interval: Option<Window>,
-    /// The weekly window.
+    /// The weekly window covering all models.
     pub weekly: Option<Window>,
+    /// Per-model weekly caps, when a provider exposes them. Anthropic Max plans
+    /// carry one per restricted model, and it can bind before [`Self::weekly`]
+    /// does. Empty for providers with a single shared weekly budget.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scoped: Vec<ScopedWindow>,
+    /// Part of the response could not be read, though enough survived to report
+    /// on.
+    ///
+    /// A dropped window renders as the same `-` an absent one does, so without
+    /// this a format change looks exactly like a provider that never sent the
+    /// window. It reports the drift, not necessarily a hole: a fallback may have
+    /// recovered the window whose primary source failed, leaving the row
+    /// complete. Distinct from `Report::error`, which means the whole account
+    /// failed. Omitted from JSON when there is nothing to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<String>,
+}
+
+impl Usage {
+    /// A usage report with no per-model caps — the shape every provider except
+    /// Anthropic produces.
+    pub fn new(interval: Option<Window>, weekly: Option<Window>) -> Self {
+        Self {
+            interval,
+            weekly,
+            scoped: Vec::new(),
+            degraded: None,
+        }
+    }
+}
+
+/// A quota window that applies to one model rather than the whole plan.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopedWindow {
+    /// The model the cap applies to, as the provider names it.
+    pub label: String,
+    #[serde(flatten)]
+    pub window: Window,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -28,6 +67,7 @@ pub struct Usage {
 pub enum Provider {
     Minimax,
     Zai,
+    Anthropic,
 }
 
 impl Provider {
@@ -35,8 +75,9 @@ impl Provider {
         match s.to_ascii_lowercase().as_str() {
             "minimax" => Ok(Self::Minimax),
             "zai" | "glm" | "zhipu" => Ok(Self::Zai),
+            "anthropic" | "claude" | "claude-code" => Ok(Self::Anthropic),
             other => Err(anyhow!(
-                "unknown provider {other:?} (expected \"minimax\" or \"zai\")"
+                "unknown provider {other:?} (expected \"minimax\", \"zai\" or \"anthropic\")"
             )),
         }
     }
@@ -45,6 +86,7 @@ impl Provider {
         match self {
             Self::Minimax => "minimax",
             Self::Zai => "zai",
+            Self::Anthropic => "anthropic",
         }
     }
 
@@ -52,15 +94,16 @@ impl Provider {
         match self {
             Self::Minimax => "https://api.minimax.io/v1/token_plan/remains",
             Self::Zai => "https://api.z.ai/api/monitor/usage/quota/limit",
+            Self::Anthropic => "https://api.anthropic.com/api/oauth/usage",
         }
     }
 
-    /// Auth header value. MiniMax wants `Bearer <key>`; Z.ai takes the raw token.
-    /// Z.ai tolerates a `Bearer` prefix too, but the raw form is what its own
-    /// clients send, so that is what we send.
+    /// Auth header value. MiniMax and Anthropic want `Bearer <token>`; Z.ai takes
+    /// the raw token. Z.ai tolerates a `Bearer` prefix too, but the raw form is
+    /// what its own clients send, so that is what we send.
     fn auth_header(&self, key: &str) -> String {
         match self {
-            Self::Minimax => format!("Bearer {key}"),
+            Self::Minimax | Self::Anthropic => format!("Bearer {key}"),
             Self::Zai => key.to_string(),
         }
     }
@@ -71,6 +114,7 @@ impl Provider {
         match self {
             Self::Minimax => minimax::parse(body),
             Self::Zai => zai::parse(body),
+            Self::Anthropic => anthropic::parse(body),
         }
     }
 

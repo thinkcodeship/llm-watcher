@@ -4,9 +4,11 @@
 //! written into `~/.claude/`.
 
 mod config;
+mod credentials;
 mod pace;
 mod progress;
 mod provider;
+mod rfc3339;
 
 use anyhow::Result;
 use clap::Parser;
@@ -51,8 +53,37 @@ struct Report {
     interval: Option<WindowReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     weekly: Option<WindowReport>,
+    /// Per-model weekly caps. Empty for providers with one shared weekly budget.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    scoped: Vec<ScopedReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Part of the response could not be read, though the account otherwise
+    /// reported fine. Unlike `error`, the row still carries usable numbers —
+    /// and a fallback may have recovered the failed window, so this reports the
+    /// drift rather than promising a hole.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    degraded: Option<String>,
+}
+
+impl Report {
+    /// Every window on this row, so no caller has to remember there are three
+    /// kinds. `--threshold` silently ignored the per-model caps when this was
+    /// spelled out as a fixed array at each use site.
+    fn windows(&self) -> impl Iterator<Item = &WindowReport> {
+        self.interval
+            .iter()
+            .chain(self.weekly.iter())
+            .chain(self.scoped.iter().map(|s| &s.window))
+    }
+}
+
+/// A per-model weekly cap, labelled with the model it applies to.
+#[derive(Serialize)]
+struct ScopedReport {
+    label: String,
+    #[serde(flatten)]
+    window: WindowReport,
 }
 
 #[derive(Serialize)]
@@ -106,7 +137,7 @@ fn run() -> Result<std::process::ExitCode> {
     }
     if accounts.is_empty() {
         anyhow::bail!(
-            "no accounts configured — set MINIMAX_API_KEY / ZHIPU_API_KEY, or write {}",
+            "no accounts configured — set MINIMAX_API_KEY / ZHIPU_API_KEY, log in with `claude`, or write {}",
             config::config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "the config file".into())
@@ -124,21 +155,38 @@ fn run() -> Result<std::process::ExitCode> {
             spinner.set(index + 1, &account.name);
             // One bad key must not hide the other plans, so failures land on the
             // row instead of aborting the run.
-            let outcome = account.key().and_then(|key| account.provider.fetch(&key));
+            let outcome = account
+                .key(now)
+                .and_then(|key| account.provider.fetch(&key));
             match outcome {
-                Ok(Usage { interval, weekly }) => Report {
+                Ok(Usage {
+                    interval,
+                    weekly,
+                    scoped,
+                    degraded,
+                }) => Report {
                     name: account.name.clone(),
                     provider: account.provider.as_str(),
                     interval: interval.as_ref().map(|w| WindowReport::from(w, now)),
                     weekly: weekly.as_ref().map(|w| WindowReport::from(w, now)),
+                    scoped: scoped
+                        .iter()
+                        .map(|s| ScopedReport {
+                            label: s.label.clone(),
+                            window: WindowReport::from(&s.window, now),
+                        })
+                        .collect(),
                     error: None,
+                    degraded,
                 },
                 Err(e) => Report {
                     name: account.name.clone(),
                     provider: account.provider.as_str(),
                     interval: None,
                     weekly: None,
+                    scoped: Vec::new(),
                     error: Some(format!("{e:#}")),
+                    degraded: None,
                 },
             }
         })
@@ -151,12 +199,38 @@ fn run() -> Result<std::process::ExitCode> {
         println!("{}", serde_json::to_string_pretty(&reports)?);
     } else {
         print_table(&reports);
+        for line in degraded_lines(&reports) {
+            eprintln!("{line}");
+        }
     }
 
     Ok(std::process::ExitCode::from(outcome_code(
         &reports,
         args.threshold,
     )))
+}
+
+/// The degradation notices as individual lines, so what reaches stderr can be
+/// asserted on without capturing the stream — the same reason `table_lines`
+/// exists.
+///
+/// These go to stderr rather than the table: a dropped window renders as the
+/// same `-` an absent one does, so the row alone cannot report the drift, and an
+/// extra table line would break the one-line-per-account shape. `--json` needs
+/// none of this, since it carries `degraded` as a field.
+fn degraded_lines(reports: &[Report]) -> Vec<String> {
+    reports
+        .iter()
+        .filter_map(|report| {
+            report.degraded.as_ref().map(|reason| {
+                format!(
+                    "{} {}: part of the response could not be read: {reason}",
+                    "warning:".yellow().bold(),
+                    report.name
+                )
+            })
+        })
+        .collect()
 }
 
 /// Exit status: `2` when nothing could be read at all, `1` when a threshold was
@@ -169,12 +243,9 @@ fn outcome_code(reports: &[Report], threshold: Option<f64>) -> u8 {
         return 2;
     }
     if let Some(threshold) = threshold {
-        let breached = reports.iter().any(|r| {
-            [&r.interval, &r.weekly]
-                .into_iter()
-                .flatten()
-                .any(|w| w.pace.is_some_and(|p| p >= threshold))
-        });
+        let breached = reports
+            .iter()
+            .any(|r| r.windows().any(|w| w.pace.is_some_and(|p| p >= threshold)));
         if breached {
             return 1;
         }
@@ -182,10 +253,29 @@ fn outcome_code(reports: &[Report], threshold: Option<f64>) -> u8 {
     0
 }
 
+/// Indent marking a per-model cap as belonging to the row above it.
+const SCOPED_PREFIX: &str = "  \u{2514} ";
+
 fn print_table(reports: &[Report]) {
+    for line in table_lines(reports) {
+        println!("{line}");
+    }
+}
+
+/// The table as individual lines, so alignment can be asserted on without
+/// capturing stdout.
+fn table_lines(reports: &[Report]) -> Vec<String> {
+    // Scoped sub-rows sit in the name column too, so their labels have to be
+    // measured or a long model name pushes its own row out of alignment.
     let name_width = reports
         .iter()
-        .map(|r| r.name.len())
+        .flat_map(|r| {
+            std::iter::once(r.name.chars().count()).chain(
+                r.scoped
+                    .iter()
+                    .map(|s| SCOPED_PREFIX.chars().count() + s.label.chars().count()),
+            )
+        })
         .max()
         .unwrap_or(4)
         .max(4);
@@ -206,32 +296,46 @@ fn print_table(reports: &[Report]) {
         .unwrap_or(0)
         .max("5H WINDOW".len());
 
-    println!(
+    let mut lines = vec![format!(
         "{:<name_width$}  {}{:pad$}  {}",
         "PLAN".bold(),
         "5H WINDOW".bold(),
         "",
         "WEEKLY".bold(),
         pad = interval_width - "5H WINDOW".len()
-    );
+    )];
 
     for (report, (interval, width)) in cells {
         if let Some(error) = &report.error {
-            println!(
+            lines.push(format!(
                 "{:<name_width$}  {}",
                 report.name,
                 format!("({error})").red()
-            );
+            ));
             continue;
         }
-        println!(
+        lines.push(format!(
             "{:<name_width$}  {interval}{:pad$}  {}",
             report.name,
             "",
             render_window(report.weekly.as_ref()).0,
             pad = interval_width.saturating_sub(width)
-        );
+        ));
+
+        // A per-model cap is a weekly budget, so it is rendered under the WEEKLY
+        // column with the 5-hour column left blank — there is no per-model
+        // session limit for it to belong to.
+        for scoped in &report.scoped {
+            lines.push(format!(
+                "{:<name_width$}  {:interval_width$}  {}",
+                format!("{SCOPED_PREFIX}{}", scoped.label),
+                "",
+                render_window(Some(&scoped.window)).0,
+            ));
+        }
     }
+
+    lines
 }
 
 /// One window as `49% used   1.2x  resets 2d 14h`, plus its *visible* width.
@@ -334,7 +438,9 @@ mod tests {
             provider: "minimax",
             interval,
             weekly: None,
+            scoped: Vec::new(),
             error: error.map(str::to_string),
+            degraded: None,
         }
     }
 
@@ -481,9 +587,58 @@ mod tests {
             provider: "zai",
             interval: Some(window(1.0, Some(0.1), None)),
             weekly: Some(window(80.0, Some(2.4), None)),
+            scoped: Vec::new(),
             error: None,
+            degraded: None,
         }];
         assert_eq!(outcome_code(&reports, Some(2.0)), 1);
+    }
+
+    #[test]
+    fn a_degraded_row_names_both_the_account_and_the_reason() {
+        // This path only ever reaches stderr, so without pinning it here its
+        // format, the account it names, and its colour behaviour are untested.
+        colored::control::set_override(false);
+        let mut row = report("claude", Some(window(4.0, Some(0.3), None)), None);
+        row.degraded = Some(r#"Anthropic sent an unreadable reset time "1786718400""#.into());
+        let lines = degraded_lines(std::slice::from_ref(&row));
+        colored::control::unset_override();
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("claude"), "{:?}", lines[0]);
+        assert!(lines[0].contains("1786718400"), "{:?}", lines[0]);
+        assert!(!lines[0].contains('\x1b'), "no_color must reach it too");
+    }
+
+    #[test]
+    fn a_healthy_run_emits_no_warning_lines_at_all() {
+        // The note has to mean something when it appears, which requires it not
+        // to appear otherwise.
+        let reports = vec![report("a", Some(window(10.0, Some(0.5), None)), None)];
+        assert!(degraded_lines(&reports).is_empty());
+    }
+
+    #[test]
+    fn a_degraded_row_serializes_its_reason_and_a_healthy_row_omits_the_key() {
+        // The JSON output is a public interface, so the presence, name and
+        // scalar shape of this key are what a consumer keys on. A healthy row
+        // must gain no new key at all — not `null`, absent.
+        let mut row = report("claude", Some(window(4.0, Some(0.3), None)), None);
+        row.degraded = Some("unreadable reset time".into());
+        let json = serde_json::to_string(std::slice::from_ref(&row)).unwrap();
+        assert!(
+            json.contains(r#""degraded":""#),
+            "a string, not an object: {json}"
+        );
+        assert!(json.contains("unreadable reset time"), "{json}");
+        assert!(
+            json.contains(r#""used_percent""#),
+            "windows still report: {json}"
+        );
+
+        let healthy = vec![report("a", Some(window(10.0, Some(0.5), None)), None)];
+        let json = serde_json::to_string(&healthy).unwrap();
+        assert!(!json.contains("degraded"), "{json}");
     }
 
     #[test]
@@ -496,6 +651,111 @@ mod tests {
     fn an_empty_report_set_is_not_treated_as_total_failure() {
         assert_eq!(outcome_code(&[], None), 0);
         assert_eq!(outcome_code(&[], Some(1.0)), 0);
+    }
+
+    /// A report carrying one per-model weekly cap.
+    fn report_with_scoped(label: &str, scoped: WindowReport) -> Report {
+        Report {
+            name: "claude".into(),
+            provider: "anthropic",
+            interval: Some(window(4.0, Some(0.3), Some(9_000_000))),
+            weekly: Some(window(78.0, Some(1.1), Some(200_000_000))),
+            scoped: vec![ScopedReport {
+                label: label.to_string(),
+                window: scoped,
+            }],
+            error: None,
+            degraded: None,
+        }
+    }
+
+    #[test]
+    fn a_per_model_cap_can_breach_the_threshold_on_its_own() {
+        // On a 20x Max plan the Opus weekly cap routinely runs ahead of the
+        // all-model weekly. Leaving it out of the threshold check would let
+        // --threshold report "fine" while that cap is the binding limit.
+        let reports = vec![report_with_scoped(
+            "Opus",
+            window(95.0, Some(2.8), Some(200_000_000)),
+        )];
+        assert_eq!(
+            outcome_code(&reports, Some(2.0)),
+            1,
+            "the scoped cap is at 2.8x and must trip the threshold"
+        );
+    }
+
+    #[test]
+    fn a_calm_per_model_cap_does_not_trip_the_threshold() {
+        let reports = vec![report_with_scoped(
+            "Opus",
+            window(10.0, Some(0.2), Some(200_000_000)),
+        )];
+        assert_eq!(outcome_code(&reports, Some(2.0)), 0);
+    }
+
+    #[test]
+    fn every_window_on_a_row_is_reachable_for_threshold_checks() {
+        // Guards the array-of-two that silently skipped scoped windows.
+        let report = report_with_scoped("Opus", window(50.0, Some(1.5), None));
+        assert_eq!(report.windows().count(), 3);
+    }
+
+    #[test]
+    fn a_scoped_row_is_indented_under_the_account_it_belongs_to() {
+        let reports = vec![report_with_scoped(
+            "Opus",
+            window(61.0, Some(0.9), Some(200_000_000)),
+        )];
+        let lines = table_lines(&reports);
+        let scoped_line = lines
+            .iter()
+            .find(|l| l.contains("Opus"))
+            .expect("a row for the per-model cap");
+
+        assert!(
+            scoped_line.starts_with(SCOPED_PREFIX),
+            "must read as part of the row above: {scoped_line:?}"
+        );
+        assert!(scoped_line.contains("61% used"), "{scoped_line:?}");
+    }
+
+    #[test]
+    fn a_long_model_name_does_not_push_its_own_row_out_of_alignment() {
+        // The scoped label shares the name column, so it has to be measured.
+        let long = "Claude-Opus-With-A-Very-Long-Name";
+        let reports = vec![report_with_scoped(
+            long,
+            window(61.0, Some(0.9), Some(200_000_000)),
+        )];
+        let lines = table_lines(&reports);
+
+        // The account row carries two cells and the scoped row only a weekly
+        // one, so the weekly cell is the second `% used` on the first and the
+        // first on the second. Comparing them positionally is the whole point:
+        // an unmeasured label pushes the sub-row's weekly cell right.
+        let cell_starts = |line: &str| -> Vec<usize> {
+            line.match_indices("% used")
+                .map(|(i, _)| line[..i].chars().count())
+                .collect()
+        };
+        let account = cell_starts(&lines[1]);
+        let scoped = cell_starts(&lines[2]);
+
+        assert_eq!(account.len(), 2, "account row has both cells: {lines:?}");
+        assert_eq!(scoped.len(), 1, "scoped row has only a weekly cell");
+        assert_eq!(
+            account[1], scoped[0],
+            "the weekly column drifted between the row and its sub-row: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_account_with_no_scoped_caps_prints_exactly_one_row() {
+        // MiniMax and Z.ai have a single shared weekly budget, so nothing may be
+        // appended to their rows.
+        let reports = vec![report("mini", Some(window(4.0, Some(1.2), None)), None)];
+        assert_eq!(table_lines(&reports).len(), 2);
     }
 
     #[test]
