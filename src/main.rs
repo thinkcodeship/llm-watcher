@@ -234,7 +234,7 @@ fn print_table(reports: &[Report]) {
     }
 }
 
-/// One window as `49% used   1.2x  resets 2d14h`, plus its *visible* width.
+/// One window as `49% used   1.2x  resets 2d 14h`, plus its *visible* width.
 ///
 /// The width is returned separately because colouring embeds ANSI escapes, and a
 /// `{:<26}` format spec counts those bytes — so coloured columns would drift out
