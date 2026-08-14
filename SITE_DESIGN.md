@@ -151,8 +151,17 @@ content, the thing that un-hides it must be the CSS engine, not JavaScript.**
 
 Static files under `docs/`, served by GitHub Pages set to **main branch,
 `/docs` folder**. No build step, no CI job, no Jekyll — `.nojekyll` is committed
-to skip it. Assets are referenced relatively so the project-page base path
-(`/llm-watcher/`) resolves without configuration.
+to skip it.
+
+The canonical address is **https://llm-watcher.thinkcodeship.com/**, a CNAME onto
+`thinkcodeship.github.io` with `docs/CNAME` holding the hostname and HTTPS
+enforced. `thinkcodeship.github.io/llm-watcher/` still works and 301s here.
+
+**Every asset reference stays relative.** That is what let the site move from the
+project-page base path (`/llm-watcher/`) to the root of a custom domain without a
+single edit — only the absolute `og:url` needed updating. Keep it that way: a
+leading slash on a stylesheet, font or icon would break the moment the base path
+changes again, and it would break silently, since a missing font just falls back.
 
 The consequence to respect: `docs/` is published the moment it lands on `main`.
 Nothing belongs in it that is not meant to be public.
