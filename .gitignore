@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.log
+
+# Never commit a captured response that still holds a key or account id.
+/scratch
