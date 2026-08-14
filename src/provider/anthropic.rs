@@ -100,6 +100,19 @@ fn window(used_percent: f64, resets_at: Option<&str>, span_ms: i64) -> Window {
     }
 }
 
+/// Window length for a limit group.
+///
+/// An unrecognized group has no known span, so it yields `None` rather than a
+/// borrowed one: usage still reports, but no pace is fabricated from a guessed
+/// length. Same rule as [`super::zai`]'s unknown unit code.
+fn span_for(group: &str) -> Option<i64> {
+    match group {
+        "session" => Some(SESSION_MS),
+        "weekly" => Some(WEEKLY_MS),
+        _ => None,
+    }
+}
+
 pub fn parse(body: &str) -> Result<Usage> {
     let response: Response = serde_json::from_str(body)
         .context("Anthropic returned a body that is not the expected JSON")?;
@@ -136,9 +149,15 @@ pub fn parse(body: &str) -> Result<Usage> {
             .and_then(|m| m.display_name.clone());
 
         match (limit.group.as_str(), model) {
-            (_, Some(label)) => scoped.push(ScopedWindow {
+            // Keyed on the group like every other arm: a model-scoped session
+            // cap runs five hours, not the seven days a scoped entry used to be
+            // assumed to have.
+            (group, Some(label)) => scoped.push(ScopedWindow {
                 label,
-                window: window(percent, resets_at, WEEKLY_MS),
+                window: match span_for(group) {
+                    Some(span) => window(percent, resets_at, span),
+                    None => Window::new(percent, None, None),
+                },
             }),
             ("session", None) => interval = Some(window(percent, resets_at, SESSION_MS)),
             ("weekly", None) => weekly = Some(window(percent, resets_at, WEEKLY_MS)),
@@ -234,6 +253,42 @@ mod tests {
         // scoped entry overwrite the 78% figure that drives the weekly row.
         let usage = parse(LIVE).unwrap();
         assert_eq!(usage.weekly.unwrap().used_percent, 78.0);
+    }
+
+    #[test]
+    fn a_model_scoped_session_cap_is_measured_over_five_hours_not_seven_days() {
+        // Stretching a 5-hour cap across a 7-day span divides its pace by ~33,
+        // so a cap burning at 3x prints well under 1x and never trips
+        // --threshold. A wrong number is worse than no number.
+        let body = r#"{"limits":[
+            {"kind":"session_scoped","group":"session","percent":50,
+             "resets_at":"2026-08-14T14:40:00Z",
+             "scope":{"model":{"display_name":"Fable"}}}
+        ]}"#;
+        let scoped = parse(body).unwrap().scoped;
+        assert_eq!(scoped.len(), 1);
+        let window = &scoped[0].window;
+        assert_eq!(
+            window.end_ms.unwrap() - window.start_ms.unwrap(),
+            5 * 3_600_000
+        );
+    }
+
+    #[test]
+    fn a_model_scoped_cap_in_an_unknown_group_reports_usage_without_a_pace() {
+        // A group this adapter cannot measure must not borrow some other
+        // window's length: usage still reports, but with no boundaries there is
+        // no pace to be wrong about.
+        let body = r#"{"limits":[
+            {"kind":"quarterly","group":"quarterly","percent":50,
+             "resets_at":"2026-08-14T14:40:00Z",
+             "scope":{"model":{"display_name":"Fable"}}}
+        ]}"#;
+        let scoped = parse(body).unwrap().scoped;
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].window.used_percent, 50.0);
+        assert_eq!(scoped[0].window.start_ms, None);
+        assert_eq!(scoped[0].window.end_ms, None);
     }
 
     #[test]
