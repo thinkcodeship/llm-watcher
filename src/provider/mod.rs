@@ -27,6 +27,14 @@ pub struct Usage {
     /// does. Empty for providers with a single shared weekly budget.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scoped: Vec<ScopedWindow>,
+    /// Why a window is missing, when one failed to parse but others survived.
+    ///
+    /// A dropped window renders as the same `-` an absent one does, so without
+    /// this a format change looks exactly like a provider that never sent the
+    /// window. Distinct from `Report::error`, which means the whole account
+    /// failed. Omitted from JSON when there is nothing to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<String>,
 }
 
 impl Usage {
@@ -37,6 +45,7 @@ impl Usage {
             interval,
             weekly,
             scoped: Vec::new(),
+            degraded: None,
         }
     }
 }

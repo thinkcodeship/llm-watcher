@@ -410,14 +410,29 @@ mod tests {
         // The buffer handed to String::from_utf8 IS the credential, and the
         // error it returns derives Debug — carrying it is one `{:?}` away from
         // printing a live token to stdout.
-        let mut document = br#"{"accessToken":"sk-ant-oat01-live"}"#.to_vec();
+        // Pinned exactly rather than by sampled substring: `Debug for Vec<u8>`
+        // prints decimals, so an ASCII-only assertion would pass against the
+        // vulnerable shape. Every three-byte run is swept in the decimal form a
+        // dump would actually take, so a partial leak has nowhere to hide.
+        let secret = "sk-ant-oat01-live";
+        let mut document = format!(r#"{{"accessToken":"{secret}"}}"#).into_bytes();
         document.push(0xff);
-        let err = format!(
-            "{:?}",
-            interpret_keychain_output(true, "exit status: 0", document, b"").unwrap_err()
+        let error =
+            interpret_keychain_output(true, "exit status: 0", document.clone(), b"").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the macOS Keychain returned non-UTF-8 bytes at offset 35 \
+             — the credential store is corrupt"
         );
-        assert!(!err.contains("sk-ant-oat01-live"), "{err}");
-        assert!(!err.contains("115, 107, 45"), "no byte dump either: {err}");
+        let debugged = format!("{error:?}");
+        assert!(!debugged.contains(secret), "{debugged}");
+        for run in document.windows(3) {
+            let dump = format!("{}, {}, {}", run[0], run[1], run[2]);
+            assert!(
+                !debugged.contains(&dump),
+                "byte dump {dump:?} leaked: {debugged}"
+            );
+        }
     }
 
     #[test]

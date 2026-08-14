@@ -218,14 +218,25 @@ pub fn parse(body: &str) -> Result<Usage> {
                     scoped.push(ScopedWindow { label, window });
                 }
             }
+            // Guarded like the scoped arm above: `take` returning None means
+            // "nothing to add", never "clear what is already there". Assigning
+            // unconditionally would let a second, malformed entry in the same
+            // group erase a window that had already parsed cleanly — the exact
+            // opposite of the rule `take` documents.
             ("session", None) => {
-                interval = take(
+                if let Some(built) = take(
                     Some(window(percent, resets_at, SESSION_MS)),
                     &mut unreadable,
-                )
+                ) {
+                    interval = Some(built);
+                }
             }
             ("weekly", None) => {
-                weekly = take(Some(window(percent, resets_at, WEEKLY_MS)), &mut unreadable)
+                if let Some(built) =
+                    take(Some(window(percent, resets_at, WEEKLY_MS)), &mut unreadable)
+                {
+                    weekly = Some(built);
+                }
             }
             _ => {}
         }
@@ -255,6 +266,11 @@ pub fn parse(body: &str) -> Result<Usage> {
         interval,
         weekly,
         scoped,
+        // Something survived, so this is not fatal — but the window that did
+        // not survive renders as the same `-` an absent one does, and silence
+        // here would leave a format change looking like normal operation. That
+        // is the blind spot the whole-account error above exists to close.
+        degraded: unreadable,
     })
 }
 
@@ -388,8 +404,44 @@ mod tests {
              "resets_at":"1786718400","scope":null}
         ]}"#;
         let usage = parse(body).unwrap();
-        assert_eq!(usage.interval.unwrap().used_percent, 4.0);
+        assert_eq!(usage.interval.as_ref().unwrap().used_percent, 4.0);
         assert!(usage.weekly.is_none(), "the unreadable one is dropped");
+        // Surviving the bad window is right; hiding that it happened is not. A
+        // `-` in the weekly column is what a provider with no weekly budget
+        // prints, so without a reason the two are indistinguishable and a
+        // response-shape change goes unnoticed while any window still parses.
+        let reason = usage
+            .degraded
+            .expect("the dropped window must be accounted for");
+        assert!(reason.contains("1786718400"), "{reason}");
+    }
+
+    #[test]
+    fn a_second_session_entry_with_an_unreadable_reset_time_does_not_delete_the_first() {
+        // `take` returning None must mean "nothing to add", never "clear what
+        // is already there" — otherwise one appended malformed duplicate erases
+        // a window that parsed cleanly, which inverts the rule it documents.
+        let body = r#"{"limits":[
+            {"kind":"session","group":"session","percent":4,
+             "resets_at":"2026-08-14T14:40:00Z","scope":null},
+            {"kind":"session","group":"session","percent":99,
+             "resets_at":"1786718400","scope":null}
+        ]}"#;
+        let usage = parse(body).unwrap();
+        assert_eq!(
+            usage
+                .interval
+                .expect("the readable session window must survive")
+                .used_percent,
+            4.0
+        );
+    }
+
+    #[test]
+    fn a_clean_response_carries_no_degradation_note() {
+        // The note must mean something when it appears, so it must be absent
+        // on the ordinary path.
+        assert!(parse(LIVE).unwrap().degraded.is_none());
     }
 
     #[test]

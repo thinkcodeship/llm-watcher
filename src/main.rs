@@ -58,6 +58,10 @@ struct Report {
     scoped: Vec<ScopedReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Why a window is missing, when the account otherwise reported fine.
+    /// Unlike `error`, the row still carries usable numbers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    degraded: Option<String>,
 }
 
 impl Report {
@@ -157,6 +161,7 @@ fn run() -> Result<std::process::ExitCode> {
                     interval,
                     weekly,
                     scoped,
+                    degraded,
                 }) => Report {
                     name: account.name.clone(),
                     provider: account.provider.as_str(),
@@ -170,6 +175,7 @@ fn run() -> Result<std::process::ExitCode> {
                         })
                         .collect(),
                     error: None,
+                    degraded,
                 },
                 Err(e) => Report {
                     name: account.name.clone(),
@@ -178,6 +184,7 @@ fn run() -> Result<std::process::ExitCode> {
                     weekly: None,
                     scoped: Vec::new(),
                     error: Some(format!("{e:#}")),
+                    degraded: None,
                 },
             }
         })
@@ -190,6 +197,15 @@ fn run() -> Result<std::process::ExitCode> {
         println!("{}", serde_json::to_string_pretty(&reports)?);
     } else {
         print_table(&reports);
+        // On stderr, and after the table: a dropped window renders as the same
+        // `-` an absent one does, so the row alone cannot say a window was
+        // lost. Kept off stdout so piping and the one-line-per-row shape of the
+        // table are both undisturbed.
+        for report in &reports {
+            if let Some(reason) = &report.degraded {
+                eprintln!("{} {}: {reason}", "warning:".yellow().bold(), report.name);
+            }
+        }
     }
 
     Ok(std::process::ExitCode::from(outcome_code(
@@ -405,6 +421,7 @@ mod tests {
             weekly: None,
             scoped: Vec::new(),
             error: error.map(str::to_string),
+            degraded: None,
         }
     }
 
@@ -553,6 +570,7 @@ mod tests {
             weekly: Some(window(80.0, Some(2.4), None)),
             scoped: Vec::new(),
             error: None,
+            degraded: None,
         }];
         assert_eq!(outcome_code(&reports, Some(2.0)), 1);
     }
@@ -581,6 +599,7 @@ mod tests {
                 window: scoped,
             }],
             error: None,
+            degraded: None,
         }
     }
 
