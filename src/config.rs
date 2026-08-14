@@ -55,9 +55,16 @@ struct Entry {
 }
 
 pub fn config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    config_path_from(
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+/// `$XDG_CONFIG_HOME/llm-watcher/config.toml`, falling back to `$HOME/.config`.
+/// Split from the environment lookup so the precedence is testable.
+fn config_path_from(xdg_config_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    let base = xdg_config_home.or_else(|| home.map(|h| h.join(".config")))?;
     Some(base.join("llm-watcher").join("config.toml"))
 }
 
@@ -97,10 +104,18 @@ pub fn parse_config(text: &str) -> Result<Vec<Account>> {
 }
 
 fn fallback_accounts() -> Vec<Account> {
+    fallback_accounts_from(|name| std::env::var(name).ok())
+}
+
+/// The fallback list filtered by whichever variables `lookup` reports as set.
+///
+/// Takes a lookup rather than reading the environment directly: mutating real
+/// process environment from tests races every other test in the binary.
+fn fallback_accounts_from(lookup: impl Fn(&str) -> Option<String>) -> Vec<Account> {
     let mut seen_zai = false;
     FALLBACK_ACCOUNTS
         .iter()
-        .filter(|(_, _, env)| std::env::var(env).is_ok_and(|v| !v.trim().is_empty()))
+        .filter(|(_, _, env)| lookup(env).is_some_and(|v| !v.trim().is_empty()))
         // ZHIPU_API_KEY and ZAI_API_KEY are two names for the same account; taking
         // both would double-count one plan as two.
         .filter(|(_, provider, _)| {
@@ -205,5 +220,144 @@ mod tests {
         };
         let err = account.key().unwrap_err().to_string();
         assert!(err.contains("LLM_WATCHER_DEFINITELY_UNSET_VAR"), "{err}");
+    }
+
+    /// A lookup backed by a fixed list, standing in for the process environment.
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    #[test]
+    fn no_environment_variables_means_no_accounts() {
+        assert!(fallback_accounts_from(env_of(&[])).is_empty());
+    }
+
+    #[test]
+    fn two_minimax_variables_produce_two_separately_keyed_accounts() {
+        // The whole reason accounts are named: one variable cannot describe two
+        // Max plans, and collapsing them would report one plan twice.
+        let accounts = fallback_accounts_from(env_of(&[
+            ("MINIMAX_API_KEY", "a"),
+            ("MINIMAX_MAX_API_KEY", "b"),
+        ]));
+        assert_eq!(accounts.len(), 2);
+        assert_ne!(accounts[0].name, accounts[1].name);
+        assert_ne!(accounts[0].key_env, accounts[1].key_env);
+    }
+
+    #[test]
+    fn the_two_zai_variable_names_never_double_count_one_plan() {
+        // ZHIPU_API_KEY and ZAI_API_KEY are two names for the same account.
+        let accounts =
+            fallback_accounts_from(env_of(&[("ZHIPU_API_KEY", "a"), ("ZAI_API_KEY", "b")]));
+        assert_eq!(accounts.len(), 1, "one plan must not appear as two rows");
+        assert_eq!(accounts[0].key_env, "ZHIPU_API_KEY", "first match wins");
+        assert_eq!(accounts[0].provider, Provider::Zai);
+    }
+
+    #[test]
+    fn either_zai_variable_alone_is_enough() {
+        for var in ["ZHIPU_API_KEY", "ZAI_API_KEY"] {
+            let accounts = fallback_accounts_from(env_of(&[(var, "k")]));
+            assert_eq!(accounts.len(), 1, "{var} should stand on its own");
+            assert_eq!(accounts[0].key_env, var);
+            assert_eq!(accounts[0].name, "glm");
+        }
+    }
+
+    #[test]
+    fn a_variable_set_to_whitespace_counts_as_unset() {
+        // An empty key produces a confusing 401 rather than an honest "not set".
+        for blank in ["", "   ", "\t"] {
+            assert!(
+                fallback_accounts_from(env_of(&[("MINIMAX_API_KEY", blank)])).is_empty(),
+                "{blank:?} must not create an account"
+            );
+        }
+    }
+
+    #[test]
+    fn both_providers_can_be_discovered_at_once() {
+        let accounts =
+            fallback_accounts_from(env_of(&[("MINIMAX_API_KEY", "a"), ("ZAI_API_KEY", "b")]));
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].provider, Provider::Minimax);
+        assert_eq!(accounts[1].provider, Provider::Zai);
+    }
+
+    #[test]
+    fn xdg_config_home_wins_over_home() {
+        let path = config_path_from(Some("/xdg".into()), Some("/home/u".into())).unwrap();
+        assert_eq!(path, PathBuf::from("/xdg/llm-watcher/config.toml"));
+    }
+
+    #[test]
+    fn home_supplies_dot_config_when_xdg_is_unset() {
+        let path = config_path_from(None, Some("/home/u".into())).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/home/u/.config/llm-watcher/config.toml")
+        );
+    }
+
+    #[test]
+    fn with_neither_variable_there_is_no_config_path() {
+        assert!(config_path_from(None, None).is_none());
+    }
+
+    #[test]
+    fn a_config_that_is_not_toml_is_an_error() {
+        assert!(parse_config("{\"account\": []}").is_err());
+        assert!(parse_config("[[account]").is_err());
+    }
+
+    #[test]
+    fn account_order_from_the_file_is_preserved() {
+        // The table prints rows in this order, so a reshuffle would be visible.
+        let text = r#"
+            [[account]]
+            name = "z-first"
+            provider = "zai"
+            key_env = "K1"
+            [[account]]
+            name = "m-second"
+            provider = "minimax"
+            key_env = "K2"
+        "#;
+        let accounts = parse_config(text).unwrap();
+        assert_eq!(accounts[0].name, "z-first");
+        assert_eq!(accounts[1].name, "m-second");
+    }
+
+    #[test]
+    fn a_key_variable_that_is_set_but_blank_is_reported_as_unset() {
+        let account = Account {
+            name: "x".into(),
+            provider: Provider::Minimax,
+            key_env: "LLM_WATCHER_TEST_BLANK_VAR".into(),
+        };
+        // Safety: this variable is used by no other test in the binary.
+        std::env::set_var("LLM_WATCHER_TEST_BLANK_VAR", "   ");
+        let result = account.key();
+        std::env::remove_var("LLM_WATCHER_TEST_BLANK_VAR");
+        assert!(result.is_err(), "a blank key must not reach the provider");
+    }
+
+    #[test]
+    fn a_set_key_variable_is_returned_verbatim() {
+        let account = Account {
+            name: "x".into(),
+            provider: Provider::Zai,
+            key_env: "LLM_WATCHER_TEST_SET_VAR".into(),
+        };
+        std::env::set_var("LLM_WATCHER_TEST_SET_VAR", "sk-secret");
+        let key = account.key();
+        std::env::remove_var("LLM_WATCHER_TEST_SET_VAR");
+        assert_eq!(key.unwrap(), "sk-secret");
     }
 }

@@ -201,4 +201,50 @@ mod tests {
     fn negative_durations_do_not_render_as_garbage() {
         assert_eq!(format_duration(-5_000), "0s");
     }
+
+    #[test]
+    fn a_window_with_no_end_has_no_reset_countdown() {
+        assert_eq!(
+            Window::new(10.0, Some(START), None).resets_in_ms(START),
+            None
+        );
+    }
+
+    #[test]
+    fn an_end_without_a_start_gives_no_pace_but_still_counts_down() {
+        let w = Window::new(10.0, None, Some(START + HOUR));
+        assert_eq!(w.pace(START), None);
+        assert_eq!(w.resets_in_ms(START), Some(HOUR));
+    }
+
+    #[test]
+    fn elapsed_exactly_at_the_threshold_produces_a_signal() {
+        // MIN_ELAPSED_FRACTION is a floor, not a gap: 2% of the window must
+        // report rather than fall into the dead zone.
+        let w = window(1.0);
+        let at_threshold = START + (5.0 * HOUR as f64 * MIN_ELAPSED_FRACTION) as i64;
+        assert!(w.pace(at_threshold).is_some());
+    }
+
+    #[test]
+    fn duration_units_change_over_at_the_right_second() {
+        assert_eq!(format_duration(59_000), "59s");
+        assert_eq!(format_duration(60_000), "1m");
+        assert_eq!(format_duration(3_599_000), "59m");
+        assert_eq!(format_duration(HOUR), "1h00m");
+        assert_eq!(format_duration(24 * HOUR - 1000), "23h59m");
+        assert_eq!(format_duration(24 * HOUR), "1d00h");
+    }
+
+    #[test]
+    fn sub_second_durations_round_down_to_zero_rather_than_vanish() {
+        assert_eq!(format_duration(999), "0s");
+    }
+
+    #[test]
+    fn usage_above_one_hundred_percent_is_reported_not_clamped() {
+        // If a provider ever reports over-quota, silently clamping would hide it.
+        let pace = window(120.0).pace(START + 5 * HOUR / 2).unwrap();
+        assert!(pace > 2.0, "got {pace}");
+    }
 }
