@@ -4,10 +4,10 @@ Answers one question: **am I burning this coding plan too fast?**
 
 ```
 $ llm-watcher
-PLAN         5H WINDOW                       WEEKLY
-minimax        4% used   1.2x  resets 4h50m   49% used   0.8x  resets 2d13h
-minimax-max    0% used   0.0x  resets 4h50m   38% used   0.6x  resets 2d13h
-glm            0% used     --                 20% used   0.6x  resets 4d13h
+PLAN         5H WINDOW                        WEEKLY
+minimax        4% used   1.2x  resets 4h 50m   49% used   0.8x  resets 2d 13h
+minimax-max    0% used   0.0x  resets 4h 50m   38% used   0.6x  resets 2d 13h
+glm            0% used     --                  20% used   0.6x  resets 4d 13h
 ```
 
 Runs, prints, exits. No daemon, no database, no listening port, no background
@@ -184,7 +184,7 @@ number climbs (consumed) or falls (remaining). If it falls, invert it in
 ## Verify
 
 ```bash
-cargo test                          # 40 tests, no network
+cargo test                          # 121 tests, no network
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -202,4 +202,11 @@ Two things worth confirming on a live run:
 
 ## License
 
-MIT. Copyright 2026 Kanshiro LLC.
+Released under the [MIT License](LICENSE) (SPDX identifier: `MIT`).
+
+Copyright (c) 2026 Kanshiro LLC.
+
+You may use, copy, modify, merge, publish, distribute, sublicense, and sell
+copies of this software, provided the copyright notice and the permission
+notice in [`LICENSE`](LICENSE) are included with any substantial portion of it.
+The software comes with no warranty.

@@ -5,6 +5,8 @@ edition = "2021"
 description = "Report LLM coding-plan quota burn rate across providers and accounts"
 authors = ["Kanshiro LLC"]
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/thinkcodeship/llm-watcher"
 
 [[bin]]
 name = "llm-watcher"

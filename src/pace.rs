@@ -77,20 +77,27 @@ impl Window {
     }
 }
 
-/// Render a duration as a compact `2d14h` / `4h57m` / `45m` / `30s`.
-/// Weekly windows run to days, so hours alone would print `86h`.
+/// Render a duration the way it would be spoken: `2d 13h` / `4h 57m` / `45m` / `30s`.
+///
+/// Weekly windows run to days, so hours alone would print `86h`. Two units carry
+/// all the signal a reset countdown needs — nobody changes behaviour over the
+/// minutes remaining in a two-day window — so smaller ones are dropped rather
+/// than concatenated.
+///
+/// A zero unit is omitted entirely: `7d`, not `7d 00h`. Padding a component to
+/// two digits reads as a clock face, which invites the countdown to be mistaken
+/// for a wall-clock reset time.
 pub fn format_duration(ms: i64) -> String {
     let total_secs = ms.max(0) / 1000;
     let (d, h) = (total_secs / 86_400, (total_secs % 86_400) / 3600);
     let (m, s) = ((total_secs % 3600) / 60, total_secs % 60);
-    if d > 0 {
-        format!("{d}d{h:02}h")
-    } else if h > 0 {
-        format!("{h}h{m:02}m")
-    } else if m > 0 {
-        format!("{m}m")
-    } else {
-        format!("{s}s")
+    match (d, h, m) {
+        (0, 0, 0) => format!("{s}s"),
+        (0, 0, _) => format!("{m}m"),
+        (0, _, 0) => format!("{h}h"),
+        (0, _, _) => format!("{h}h {m}m"),
+        (_, 0, _) => format!("{d}d"),
+        (_, _, _) => format!("{d}d {h}h"),
     }
 }
 
@@ -184,8 +191,8 @@ mod tests {
     }
 
     #[test]
-    fn durations_format_compactly() {
-        assert_eq!(format_duration(2 * HOUR + 5 * 60_000), "2h05m");
+    fn durations_read_as_spaced_units() {
+        assert_eq!(format_duration(2 * HOUR + 5 * 60_000), "2h 5m");
         assert_eq!(format_duration(45 * 60_000), "45m");
         assert_eq!(format_duration(30_000), "30s");
         assert_eq!(format_duration(0), "0s");
@@ -193,12 +200,88 @@ mod tests {
 
     #[test]
     fn week_scale_durations_use_days_not_three_digit_hours() {
-        assert_eq!(format_duration(2 * 24 * HOUR + 14 * HOUR), "2d14h");
-        assert_eq!(format_duration(7 * 24 * HOUR), "7d00h");
+        assert_eq!(format_duration(2 * 24 * HOUR + 14 * HOUR), "2d 14h");
+        assert_eq!(format_duration(7 * 24 * HOUR), "7d");
+    }
+
+    /// A zero component is dropped, never padded — `4h`, not `4h 00m`.
+    #[test]
+    fn a_zero_component_is_omitted_rather_than_padded() {
+        assert_eq!(format_duration(4 * HOUR), "4h");
+        assert_eq!(format_duration(24 * HOUR), "1d");
+        assert_eq!(format_duration(24 * HOUR + 30 * 60_000), "1d");
+        assert_eq!(format_duration(60_000), "1m");
+    }
+
+    /// Only the two largest units survive, so the countdown cannot grow a third
+    /// column and push the weekly block out of alignment.
+    #[test]
+    fn no_duration_renders_more_than_two_units() {
+        let cases = [
+            59_000,
+            60_000,
+            HOUR - 1,
+            HOUR + 59 * 60_000 + 59_000,
+            25 * HOUR + 59 * 60_000,
+            400 * 24 * HOUR + 23 * HOUR + 59 * 60_000,
+        ];
+        for ms in cases {
+            let rendered = format_duration(ms);
+            assert!(
+                rendered.matches(' ').count() <= 1,
+                "{ms}ms rendered as {rendered:?}, which is more than two units"
+            );
+        }
     }
 
     #[test]
     fn negative_durations_do_not_render_as_garbage() {
         assert_eq!(format_duration(-5_000), "0s");
+    }
+
+    #[test]
+    fn a_window_with_no_end_has_no_reset_countdown() {
+        assert_eq!(
+            Window::new(10.0, Some(START), None).resets_in_ms(START),
+            None
+        );
+    }
+
+    #[test]
+    fn an_end_without_a_start_gives_no_pace_but_still_counts_down() {
+        let w = Window::new(10.0, None, Some(START + HOUR));
+        assert_eq!(w.pace(START), None);
+        assert_eq!(w.resets_in_ms(START), Some(HOUR));
+    }
+
+    #[test]
+    fn elapsed_exactly_at_the_threshold_produces_a_signal() {
+        // MIN_ELAPSED_FRACTION is a floor, not a gap: 2% of the window must
+        // report rather than fall into the dead zone.
+        let w = window(1.0);
+        let at_threshold = START + (5.0 * HOUR as f64 * MIN_ELAPSED_FRACTION) as i64;
+        assert!(w.pace(at_threshold).is_some());
+    }
+
+    #[test]
+    fn duration_units_change_over_at_the_right_second() {
+        assert_eq!(format_duration(59_000), "59s");
+        assert_eq!(format_duration(60_000), "1m");
+        assert_eq!(format_duration(3_599_000), "59m");
+        assert_eq!(format_duration(HOUR), "1h");
+        assert_eq!(format_duration(24 * HOUR - 1000), "23h 59m");
+        assert_eq!(format_duration(24 * HOUR), "1d");
+    }
+
+    #[test]
+    fn sub_second_durations_round_down_to_zero_rather_than_vanish() {
+        assert_eq!(format_duration(999), "0s");
+    }
+
+    #[test]
+    fn usage_above_one_hundred_percent_is_reported_not_clamped() {
+        // If a provider ever reports over-quota, silently clamping would hide it.
+        let pace = window(120.0).pace(START + 5 * HOUR / 2).unwrap();
+        assert!(pace > 2.0, "got {pace}");
     }
 }
