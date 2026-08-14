@@ -3,6 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Rust 2021](https://img.shields.io/badge/rust-2021%20edition-orange.svg)
 
+Project page: **[llm-watcher.thinkcodeship.com](https://llm-watcher.thinkcodeship.com/)**
+
 Answers one question: **am I burning this coding plan too fast?**
 
 ```
