@@ -9,6 +9,7 @@ mod pace;
 mod progress;
 mod provider;
 mod rfc3339;
+mod status_page;
 
 use anyhow::Result;
 use clap::Parser;
@@ -16,6 +17,7 @@ use colored::Colorize;
 use pace::{format_duration, Window};
 use provider::Usage;
 use serde::Serialize;
+use status_page::StatusPageReport;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
@@ -64,6 +66,13 @@ struct Report {
     /// drift rather than promising a hole.
     #[serde(skip_serializing_if = "Option::is_none")]
     degraded: Option<String>,
+    /// Vendor's official status-page snapshot, when one is mapped and
+    /// reachable. Absent (not `null`) when: the provider has no mapped page,
+    /// the fetch failed, or the quota fetch errored. Fetched only on quota
+    /// success so the hermetic test suite (which fails accounts at key
+    /// resolution) never reaches the network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_page: Option<StatusPageReport>,
 }
 
 impl Report {
@@ -164,21 +173,32 @@ fn run() -> Result<std::process::ExitCode> {
                     weekly,
                     scoped,
                     degraded,
-                }) => Report {
-                    name: account.name.clone(),
-                    provider: account.provider.as_str(),
-                    interval: interval.as_ref().map(|w| WindowReport::from(w, now)),
-                    weekly: weekly.as_ref().map(|w| WindowReport::from(w, now)),
-                    scoped: scoped
-                        .iter()
-                        .map(|s| ScopedReport {
-                            label: s.label.clone(),
-                            window: WindowReport::from(&s.window, now),
-                        })
-                        .collect(),
-                    error: None,
-                    degraded,
-                },
+                }) => {
+                    // Status page is fetched only on quota success: a failed
+                    // account would otherwise hit the network from the
+                    // hermetic test harness, and the quota error is the more
+                    // urgent signal anyway. Fetch failures collapse to None.
+                    let status_page = account
+                        .provider
+                        .status_page_url()
+                        .and_then(|url| status_page::fetch(url).ok());
+                    Report {
+                        name: account.name.clone(),
+                        provider: account.provider.as_str(),
+                        interval: interval.as_ref().map(|w| WindowReport::from(w, now)),
+                        weekly: weekly.as_ref().map(|w| WindowReport::from(w, now)),
+                        scoped: scoped
+                            .iter()
+                            .map(|s| ScopedReport {
+                                label: s.label.clone(),
+                                window: WindowReport::from(&s.window, now),
+                            })
+                            .collect(),
+                        error: None,
+                        degraded,
+                        status_page,
+                    }
+                }
                 Err(e) => Report {
                     name: account.name.clone(),
                     provider: account.provider.as_str(),
@@ -187,6 +207,7 @@ fn run() -> Result<std::process::ExitCode> {
                     scoped: Vec::new(),
                     error: Some(format!("{e:#}")),
                     degraded: None,
+                    status_page: None,
                 },
             }
         })
@@ -314,11 +335,21 @@ fn table_lines(reports: &[Report]) -> Vec<String> {
             ));
             continue;
         }
+        // A non-operational status page is shown as a trailing marker on the
+        // account row, after the weekly cell. Operational status is invisible
+        // — adding a `✓` for healthy would clutter every row.
+        let status_marker = report
+            .status_page
+            .as_ref()
+            .filter(|s| s.status != "none")
+            .map(render_status_marker)
+            .unwrap_or_default();
         lines.push(format!(
-            "{:<name_width$}  {interval}{:pad$}  {}",
+            "{:<name_width$}  {interval}{:pad$}  {}{}",
             report.name,
             "",
             render_window(report.weekly.as_ref()).0,
+            status_marker,
             pad = interval_width.saturating_sub(width)
         ));
 
@@ -399,9 +430,29 @@ fn colorize_pace(pace: f64, text: &str) -> String {
     }
 }
 
+/// Trailing marker for a non-operational status page, e.g. `"  ⚠ major —
+/// Elevated API errors on Claude Opus 4.5"`. Operational status returns the
+/// empty string, so the caller can append unconditionally.
+fn render_status_marker(status: &StatusPageReport) -> String {
+    let first = status.incidents.first().map(|i| i.name.as_str());
+    let body = match first {
+        Some(name) => format!("{} \u{2014} {name}", status.status),
+        None => status.status.clone(),
+    };
+    let text = format!("  \u{26a0} {body}");
+    match status.status.as_str() {
+        "critical" => text.red().bold().to_string(),
+        "major" => text.red().to_string(),
+        "minor" | "custom" => text.yellow().to_string(),
+        "maintenance" => text.dimmed().to_string(),
+        _ => text.normal().to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status_page::Incident;
 
     /// The visible width of a cell, ignoring any ANSI escapes `colored` added.
     /// `render_window` promises exactly this number, and the table's alignment
@@ -441,6 +492,7 @@ mod tests {
             scoped: Vec::new(),
             error: error.map(str::to_string),
             degraded: None,
+            status_page: None,
         }
     }
 
@@ -590,6 +642,7 @@ mod tests {
             scoped: Vec::new(),
             error: None,
             degraded: None,
+            status_page: None,
         }];
         assert_eq!(outcome_code(&reports, Some(2.0)), 1);
     }
@@ -666,6 +719,7 @@ mod tests {
             }],
             error: None,
             degraded: None,
+            status_page: None,
         }
     }
 
@@ -723,24 +777,35 @@ mod tests {
     #[test]
     fn a_long_model_name_does_not_push_its_own_row_out_of_alignment() {
         // The scoped label shares the name column, so it has to be measured.
+        // Colour matters here: `render_window` returns `(text, visible_width)`
+        // and pads with spaces to that width, so the only correct measurement
+        // is the visible one. Counting raw chars silently folds in the escape
+        // sequences of any coloured cell — and a parallel test that leaves
+        // `colored::control::override` on produces a 9-char drift between the
+        // row and its sub-row even though the columns align on the terminal.
         let long = "Claude-Opus-With-A-Very-Long-Name";
         let reports = vec![report_with_scoped(
             long,
             window(61.0, Some(0.9), Some(200_000_000)),
         )];
+
+        // Force colour on so the path that actually escapes is exercised. The
+        // assertion below must hold in either state — that is the whole point.
+        colored::control::set_override(true);
         let lines = table_lines(&reports);
+        colored::control::unset_override();
 
         // The account row carries two cells and the scoped row only a weekly
         // one, so the weekly cell is the second `% used` on the first and the
         // first on the second. Comparing them positionally is the whole point:
         // an unmeasured label pushes the sub-row's weekly cell right.
-        let cell_starts = |line: &str| -> Vec<usize> {
+        let cell_starts_visible = |line: &str| -> Vec<usize> {
             line.match_indices("% used")
-                .map(|(i, _)| line[..i].chars().count())
+                .map(|(byte_idx, _)| visible_len(&line[..byte_idx]))
                 .collect()
         };
-        let account = cell_starts(&lines[1]);
-        let scoped = cell_starts(&lines[2]);
+        let account = cell_starts_visible(&lines[1]);
+        let scoped = cell_starts_visible(&lines[2]);
 
         assert_eq!(account.len(), 2, "account row has both cells: {lines:?}");
         assert_eq!(scoped.len(), 1, "scoped row has only a weekly cell");
@@ -794,5 +859,154 @@ mod tests {
         colored::control::set_override(false);
         print_table(&[report("x", Some(window(1.0, Some(0.1), Some(1_000))), None)]);
         colored::control::unset_override();
+    }
+
+    /// Build a status-page snapshot for renderer tests. Pure — no I/O.
+    fn status_page(
+        status: &str,
+        description: &str,
+        incidents: Vec<(&str, &str)>,
+    ) -> StatusPageReport {
+        StatusPageReport {
+            status: status.to_string(),
+            description: description.to_string(),
+            incidents: incidents
+                .into_iter()
+                .map(|(name, impact)| Incident {
+                    name: name.to_string(),
+                    impact: impact.to_string(),
+                    status: "investigating".to_string(),
+                    shortlink: format!("https://status.example/{}", name.replace(' ', "_")),
+                })
+                .collect(),
+            scheduled_maintenances: Vec::new(),
+        }
+    }
+
+    /// Wrap a Report with an optional status page.
+    fn report_with_status(status_page: Option<StatusPageReport>) -> Report {
+        Report {
+            name: "claude".into(),
+            provider: "anthropic",
+            interval: Some(window(10.0, Some(0.5), Some(60_000))),
+            weekly: Some(window(50.0, Some(0.8), Some(200_000_000))),
+            scoped: Vec::new(),
+            error: None,
+            degraded: None,
+            status_page,
+        }
+    }
+
+    #[test]
+    fn a_non_operational_status_appends_a_marker_to_the_row() {
+        colored::control::set_override(false);
+        let page = status_page(
+            "major",
+            "Partial System Outage",
+            vec![("Elevated API errors on Claude Opus 4.5", "major")],
+        );
+        let lines = table_lines(&[report_with_status(Some(page))]);
+        colored::control::unset_override();
+
+        // header + 1 row, marker is appended to the same row, no extra line.
+        assert_eq!(
+            lines.len(),
+            2,
+            "marker rides the row, no extra line: {lines:?}"
+        );
+        let row = &lines[1];
+        assert!(row.contains("claude"), "{row}");
+        assert!(row.contains("\u{26a0}"), "the warning glyph: {row}");
+        assert!(row.contains("major"), "{row}");
+        assert!(
+            row.contains("Elevated API errors"),
+            "the first incident name rides along: {row}"
+        );
+    }
+
+    #[test]
+    fn an_operational_status_emits_no_marker() {
+        colored::control::set_override(false);
+        let page = status_page("none", "All Systems Operational", vec![]);
+        let lines = table_lines(&[report_with_status(Some(page))]);
+        colored::control::unset_override();
+
+        // Operational is invisible — no extra content on the row.
+        let row = &lines[1];
+        assert!(!row.contains('\u{26a0}'), "{row}");
+        assert!(!row.contains("operational"), "{row}");
+    }
+
+    #[test]
+    fn a_missing_status_page_emits_no_marker() {
+        colored::control::set_override(false);
+        let lines = table_lines(&[report_with_status(None)]);
+        colored::control::unset_override();
+
+        assert!(!lines[1].contains('\u{26a0}'), "{:?}", lines[1]);
+    }
+
+    #[test]
+    fn a_status_page_marker_is_colorised_by_severity() {
+        colored::control::set_override(true);
+        // Each Statuspage.io indicator maps to a specific colour band; `colored`
+        // may combine attributes into a single CSI sequence (e.g. `[1;31m` for
+        // bold + red) rather than two separate ones, so each branch is pinned
+        // to its exact opening sequence rather than parsed pieces.
+        for (indicator, expected_open) in [
+            ("critical", "\u{1b}[1;31m"), // bold + red
+            ("major", "\u{1b}[31m"),      // red
+            ("minor", "\u{1b}[33m"),      // yellow
+            ("maintenance", "\u{1b}[2m"), // dim
+        ] {
+            let page = status_page(indicator, "Test", vec![]);
+            let marker = render_status_marker(&page);
+            assert!(
+                marker.starts_with(expected_open),
+                "{indicator} should open with {expected_open:?}: {marker:?}"
+            );
+        }
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn a_non_operational_status_serialises_into_the_json_row() {
+        let page = status_page(
+            "major",
+            "Partial System Outage",
+            vec![("Elevated API errors", "major")],
+        );
+        let row = report_with_status(Some(page));
+        let json = serde_json::to_string(&[row]).unwrap();
+        assert!(json.contains(r#""status":"major""#), "{json}");
+        assert!(json.contains(r#""status_page""#), "{json}");
+        assert!(json.contains(r#""impact":"major""#), "{json}");
+        assert!(!json.contains("null"), "{json}");
+    }
+
+    #[test]
+    fn an_absent_status_page_omits_the_field_in_json() {
+        // A row with no status_page must not gain a `null` field — that is the
+        // same absent-not-null invariant the other optional fields obey.
+        let row = report_with_status(None);
+        let json = serde_json::to_string(&[row]).unwrap();
+        assert!(!json.contains("status_page"), "{json}");
+        assert!(!json.contains("null"), "{json}");
+    }
+
+    #[test]
+    fn an_operational_status_serialises_but_does_not_render() {
+        // The JSON still carries the snapshot — a cron consumer may want to
+        // know "Claude is fine" — but the table skips it. Both behaviours
+        // share the same data, branch differently.
+        let page = status_page("none", "All Systems Operational", vec![]);
+        let row = report_with_status(Some(page.clone()));
+        let json = serde_json::to_string(&[row]).unwrap();
+        assert!(json.contains(r#""status":"none""#), "{json}");
+
+        colored::control::set_override(false);
+        let lines = table_lines(&[report_with_status(Some(page))]);
+        colored::control::unset_override();
+        assert!(!lines[1].contains('\u{26a0}'), "{:?}", lines[1]);
     }
 }

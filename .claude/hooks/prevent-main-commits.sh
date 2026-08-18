@@ -6,7 +6,7 @@
 # (main or master), so changes can only reach the default branch through a
 # reviewed pull request.
 #
-# Per CLAUDE.md "Never Commit to Main (MANDATORY)" and .claude/rules/workflow-branch-safety.md:
+# Per .claude/rules/workflow-never-commit-to-main.md:
 # - NEVER commit directly to main (or master)
 # - NEVER push directly to main (or master)
 # - All changes to the default branch must go through a pull request
@@ -143,7 +143,7 @@ if printf '%s' "${COMMAND}" | grep -q '"tool_input"'; then
     if is_protected_branch "${BRANCH}"; then
         cat >&2 <<EOF
 BLOCKED: Unparseable git command on protected branch '${BRANCH}'.
-Per CLAUDE.md "Never Commit to Main (MANDATORY)" and .claude/rules/workflow-branch-safety.md:
+Per .claude/rules/workflow-never-commit-to-main.md:
   - NEVER commit or push directly to main (or master)
   - All changes to the default branch must go through a pull request
 EOF
@@ -163,7 +163,7 @@ if printf '%s' "${COMMAND}" | grep -qE "${GIT_COMMIT_GATE}"; then
     if is_protected_branch "${BRANCH}"; then
         cat >&2 <<EOF
 BLOCKED: git commit on protected branch '${BRANCH}'.
-Per CLAUDE.md "Never Commit to Main (MANDATORY)" and .claude/rules/workflow-branch-safety.md:
+Per .claude/rules/workflow-never-commit-to-main.md:
   - NEVER commit directly to main (or master)
   - All changes to the default branch must go through a pull request
 Create a feature branch first:
@@ -259,7 +259,7 @@ while IFS= read -r SEGMENT; do
         refspec)
             cat >&2 <<EOF
 BLOCKED: git push targets a protected branch (main or master).
-Per CLAUDE.md "Never Commit to Main (MANDATORY)" and .claude/rules/workflow-branch-safety.md:
+Per .claude/rules/workflow-never-commit-to-main.md:
   - NEVER push directly to main (or master)
   - Push a feature branch and open a pull request instead
 EOF
@@ -268,7 +268,7 @@ EOF
         current:*)
             cat >&2 <<EOF
 BLOCKED: git push would push protected branch '${VERDICT#current:}'.
-Per CLAUDE.md "Never Commit to Main (MANDATORY)" and .claude/rules/workflow-branch-safety.md:
+Per .claude/rules/workflow-never-commit-to-main.md:
   - NEVER push directly to main (or master)
   - Push a feature branch and open a pull request instead
 EOF

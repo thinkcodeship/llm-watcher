@@ -1,0 +1,16 @@
+{
+  "page": {
+    "id": "k8c9z5h7y3nx",
+    "name": "Claude Status",
+    "url": "https://status.claude.com",
+    "time_zone": "America/Los_Angeles",
+    "updated_at": "2026-08-19T18:00:00.000Z"
+  },
+  "status": {
+    "indicator": "none",
+    "description": "All Systems Operational"
+  },
+  "status_description": "All Systems Operational",
+  "incidents": [],
+  "scheduled_maintenances": []
+}

@@ -122,24 +122,44 @@ impl Provider {
         if key.trim().is_empty() {
             return Err(anyhow!("key is empty"));
         }
-        let body = http_get(self.endpoint(), &self.auth_header(key))
+        let body = http_get(self.endpoint(), Some(&self.auth_header(key)))
             .with_context(|| format!("querying {}", self.endpoint()))?;
         self.parse(&body)
     }
+
+    /// Vendor's status-page URL, when one is wired up.
+    ///
+    /// Status pages are per-provider: every account of the same provider shares
+    /// the same page, so the URL lives on the enum rather than per-account.
+    /// `None` means "no page is mapped yet" — adding another provider is one
+    /// match arm here plus a fixture in `tests/fixtures/`.
+    pub fn status_page_url(&self) -> Option<&'static str> {
+        match self {
+            Self::Anthropic => Some(crate::status_page::ANTHROPIC_URL),
+            Self::Minimax | Self::Zai => None,
+        }
+    }
 }
 
-fn http_get(url: &str, authorization: &str) -> Result<String> {
-    // Non-2xx must not short-circuit: both providers return a machine-readable
-    // error document that says more than the status code does.
+/// Shared HTTP GET for both quota endpoints and the public status pages.
+///
+/// `authorization` is `Some(value)` for the quota endpoints, `None` for
+/// public status pages (which need no `Authorization` header at all, and an
+/// empty value would still reach the server). Non-2xx is not fatal because
+/// every backend returns a machine-readable error envelope that says more
+/// than the status code does.
+pub(crate) fn http_get(url: &str, authorization: Option<&str>) -> Result<String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(TIMEOUT))
         .build()
         .into();
 
-    let mut response = agent
-        .get(url)
-        .header("Authorization", authorization)
+    let mut request = agent.get(url);
+    if let Some(authorization) = authorization {
+        request = request.header("Authorization", authorization);
+    }
+    let mut response = request
         .header("Content-Type", "application/json")
         .header("Accept-Language", "en-US,en")
         .call()?;
