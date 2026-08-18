@@ -76,6 +76,31 @@ Reset times show the two largest units, zeros dropped — `2d 13h`, `4h 50m`,
 `45m`, `30s`, and plain `7d` for a week untouched. Minutes remaining in a
 two-day window is not a number anyone acts on, so it is not shown.
 
+### Provider status
+
+When a row's provider has a public status page, `llm-watcher` fetches it and
+appends a marker when the indicator is anything other than `none`:
+
+```
+claude        10% used  0.1x  resets 1h 37m   80% used  1.3x  resets 2d 14h  ⚠ major — Elevated API errors on Claude Opus 4.5
+  └ Fable                                     61% used  1.0x  resets 2d 14h
+```
+
+The marker carries the Statuspage.io indicator (`none` | `minor` | `major` |
+`critical` | `maintenance` | `custom`), a colour band by severity, and the first
+incident name when one is open. `none` — operational — produces no marker, so
+a healthy run reads exactly as it did before this feature landed.
+
+Only Anthropic is wired up today (→ `https://status.claude.com/api/v2/summary.json`).
+Adding another provider is one match arm on `Provider::status_page_url()` plus a
+fixture in `tests/fixtures/`. MiniMax and Z.ai return `None` until their pages
+are verified.
+
+The status fetch only runs when the quota fetch succeeds, so the
+hermetic test suite (which fails accounts at key resolution) never reaches the
+network. Failures collapse to an absent field, not an error — the quota row is
+unaffected.
+
 ## Install
 
 ```bash
@@ -238,7 +263,17 @@ table, keeping stdout pipeable and the table one line per account.
     "weekly":   { "used_percent": 80.0, "pace": 1.2794, "resets_in_ms": 226647754 },
     "scoped": [
       { "label": "Fable", "used_percent": 61.0, "pace": 0.9756, "resets_in_ms": 226647754 }
-    ]
+    ],
+    "status_page": {
+      "status": "major",
+      "description": "Partial System Outage",
+      "incidents": [
+        { "name": "Elevated API errors on Claude Opus 4.5",
+          "impact": "major",
+          "status": "identified",
+          "shortlink": "https://status.claude.com/incidents/abc123def456" }
+      ]
+    }
   }
 ]
 ```
@@ -247,11 +282,11 @@ table, keeping stdout pipeable and the table one line per account.
 
 ## Providers
 
-| Provider | Endpoint | Auth |
-|----------|----------|------|
-| MiniMax Token Plan | `GET https://api.minimax.io/v1/token_plan/remains` | `Authorization: Bearer <Subscription Key>` |
-| Z.ai / GLM Coding Plan | `GET https://api.z.ai/api/monitor/usage/quota/limit` | `Authorization: <token>` — **no `Bearer` prefix** |
-| Anthropic Claude (Pro, Max 5x, Max 20x) | `GET https://api.anthropic.com/api/oauth/usage` | `Authorization: Bearer <OAuth token>` |
+| Provider | Endpoint | Auth | Status page |
+|----------|----------|------|--------------|
+| MiniMax Token Plan | `GET https://api.minimax.io/v1/token_plan/remains` | `Authorization: Bearer <Subscription Key>` | — |
+| Z.ai / GLM Coding Plan | `GET https://api.z.ai/api/monitor/usage/quota/limit` | `Authorization: <token>` — **no `Bearer` prefix** | — |
+| Anthropic Claude (Pro, Max 5x, Max 20x) | `GET https://api.anthropic.com/api/oauth/usage` | `Authorization: Bearer <OAuth token>` | `status.claude.com` |
 
 The asymmetry in that last column is real, not a typo. Getting it backwards
 produces a `401` that reads exactly like a bad key.
