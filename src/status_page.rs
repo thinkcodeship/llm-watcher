@@ -159,6 +159,13 @@ mod tests {
     const OPERATIONAL: &str = include_str!("../tests/fixtures/status_claude_operational.json");
     const MALFORMED: &str = include_str!("../tests/fixtures/status_claude_malformed.json");
 
+    // The 6-char ASCII sequences the JSON-escape decoder consumes. Embedded
+    // as raw-string literals so the source file carries no raw control bytes;
+    // `serde_json` decodes them into raw `\x1b` and `\x07` bytes inside the
+    // resulting Rust String.
+    const JSON_ESC: &str = "\u{5c}u001b";
+    const JSON_BEL: &str = "\u{5c}u0007";
+
     #[test]
     fn partial_outage_carries_the_open_incident() {
         let report = parse(PARTIAL_OUTAGE).expect("parses");
@@ -225,51 +232,58 @@ mod tests {
 
     #[test]
     fn escape_sequences_are_stripped_at_parse_time() {
-        // `serde_json` decodes `` (the 6-char ASCII sequence
-        // backslash-u-0-0-1-b) into a single raw `\x1b` byte inside the
-        // resulting Rust String. We embed those 6 ASCII chars directly in
-        // the JSON source so the source file carries no raw control bytes;
-        // serde_json does the conversion.
-        let body = r#"{
-            "status": {"indicator": "majorc", "description": "d"},
-            "status_description": "",
-            "incidents": [
-                {"name": "evillink",
-                 "impact": "major", "status": "identified",
-                 "shortlink": "https://status.claude.com/incidents/x"}
-            ],
-            "scheduled_maintenances": []
-        }"#;
-        let report = parse(body).unwrap();
-        assert!(
-            !report.status.contains('\u{1b}'),
-            "indicator: {:?}",
-            report.status
+        // Build a JSON body that, after `serde_json` decodes the
+        // `JSON_ESC` and `JSON_BEL` JSON-escape sequences, contains a
+        // real CSI sequence (`ESC [ 2 J`) inside the indicator and a
+        // real OSC hyperlink (`ESC ] 8 ; ; URL BEL`) inside the incident
+        // name. `sanitize_for_tty` must strip both sequences at the parse
+        // boundary; legitimate text around them survives.
+        let body = format!(
+            r#"{{
+                "status": {{"indicator": "major{JSON_ESC}[2Jc", "description": "d"}},
+                "status_description": "",
+                "incidents": [
+                    {{"name": "evil{JSON_ESC}]8;;{JSON_BEL}link",
+                     "impact": "major", "status": "identified",
+                     "shortlink": "https://status.claude.com/incidents/x"}}
+                ],
+                "scheduled_maintenances": []
+            }}"#
         );
-        assert!(
-            !report.incidents[0].name.contains('\u{1b}'),
-            "name: {:?}",
-            report.incidents[0].name
-        );
-        // Legitimate text survives the strip.
-        assert!(report.incidents[0].name.contains("evillink"));
-        assert!(report.status.starts_with("major"));
+        let report = parse(&body).unwrap();
+        // CSI in the indicator strips `[2J`; "majorc" survives.
+        assert_eq!(report.status, "majorc");
+        // OSC in the name terminates at BEL; "evillink" survives.
+        assert_eq!(report.incidents[0].name, "evillink");
+        // No raw control bytes anywhere in the public-facing fields.
+        assert!(!report.status.contains('\u{1b}'));
+        assert!(!report.incidents[0].name.contains('\u{1b}'));
+        assert!(!report.status.contains('\u{7}'));
+        assert!(!report.incidents[0].name.contains('\u{7}'));
     }
 
     #[test]
     fn sanitize_for_tty_drops_csi_and_osc_sequences() {
-        // CSI `ESC [ 2 J` clears the screen; OSC `ESC ] 8 ; ; URL BEL` is the
-        // hyperlink sequence. Both should vanish; legitimate text around them
-        // survives.
-        let dirty = "beforec2Jmiddlelinkafter";
-        let clean = sanitize_for_tty(dirty);
-        assert!(!clean.contains('\u{1b}'), "got: {clean:?}");
-        assert!(clean.contains("before"));
-        assert!(clean.contains("middle"));
-        assert!(clean.contains("after"));
-        assert!(
-            clean.contains("link"),
-            "OSC hyperlink target stripped too: {clean:?}"
-        );
+        // CSI: "ESC [ 2 J" clears the screen.
+        let csi = "before\x1b[2Jmiddle";
+        assert_eq!(sanitize_for_tty(csi), "beforemiddle");
+
+        // OSC: "ESC ] 8 ; ; URL BEL" is the hyperlink sequence.
+        let osc = "start\x1b]8;;https://evil.example\x07end";
+        assert_eq!(sanitize_for_tty(osc), "startend");
+
+        // Bare ESC with neither `[` nor `]` drops ESC and the next byte.
+        assert_eq!(sanitize_for_tty("a\x1b.b"), "ab");
+
+        // TAB and LF preserved; other C0 dropped.
+        assert_eq!(sanitize_for_tty("a\nb\tc"), "a\nb\tc");
+        assert_eq!(sanitize_for_tty("a\rb"), "ab");
+
+        // Empty string.
+        assert_eq!(sanitize_for_tty(""), "");
+
+        // Unicode passes through.
+        let s = "caf\u{e9} \u{1f4a9} \u{4f60}\u{597d}";
+        assert_eq!(sanitize_for_tty(s), s);
     }
 }
