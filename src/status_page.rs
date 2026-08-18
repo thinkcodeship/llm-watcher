@@ -73,6 +73,45 @@ pub fn fetch(url: &str) -> Result<StatusPageReport> {
     parse(&body)
 }
 
+/// Strip ANSI escape sequences and C0 control characters from a value
+/// crossing the JSON trust boundary. `serde_json` decodes `` JSON-escapes
+/// to raw `\x1b` bytes before serde sees them, so a Statuspage.io response
+/// that (intentionally or not) contains a CSI or OSC sequence in an
+/// indicator, description, or incident name would otherwise reach the
+/// operator's TTY verbatim via `format!` + `colored`'s wrappers.
+///
+/// CSI (`ESC [` ... final-byte in `0x40..=0x7e`) and OSC (`ESC ]` ... BEL)
+/// sequences are dropped in their entirety; other C0 controls are dropped
+/// except TAB and LF. Legitimate Statuspage content has none of either.
+fn sanitize_for_tty(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if (0x40..=0x7e).contains(&(c as u32)) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    for c in chars.by_ref() {
+                        if c == '\u{7}' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            c if (c as u32) < 0x20 && c != '\t' && c != '\n' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Parse a captured `/api/v2/summary.json` body. Pure — no I/O — so the
 /// fixtures in `tests/fixtures/` exercise every branch without a network.
 pub fn parse(body: &str) -> Result<StatusPageReport> {
@@ -82,9 +121,21 @@ pub fn parse(body: &str) -> Result<StatusPageReport> {
         // The nested `status.description` is the canonical human text;
         // `status_description` is a duplicated top-level convenience field
         // that the server emits but the nested one shadows.
-        status: wire.status.indicator,
-        description: pick_description(&wire.status.description, &wire.status_description),
-        incidents: wire.incidents,
+        status: sanitize_for_tty(&wire.status.indicator),
+        description: sanitize_for_tty(&pick_description(
+            &wire.status.description,
+            &wire.status_description,
+        )),
+        incidents: wire
+            .incidents
+            .into_iter()
+            .map(|i| Incident {
+                name: sanitize_for_tty(&i.name),
+                impact: i.impact,
+                status: i.status,
+                shortlink: i.shortlink,
+            })
+            .collect(),
         scheduled_maintenances: wire.scheduled_maintenances,
     })
 }
@@ -170,5 +221,55 @@ mod tests {
         assert_eq!(pick_description("", "top"), "top");
         assert_eq!(pick_description("nested", ""), "nested");
         assert_eq!(pick_description("", ""), "");
+    }
+
+    #[test]
+    fn escape_sequences_are_stripped_at_parse_time() {
+        // `serde_json` decodes `` (the 6-char ASCII sequence
+        // backslash-u-0-0-1-b) into a single raw `\x1b` byte inside the
+        // resulting Rust String. We embed those 6 ASCII chars directly in
+        // the JSON source so the source file carries no raw control bytes;
+        // serde_json does the conversion.
+        let body = r#"{
+            "status": {"indicator": "majorc", "description": "d"},
+            "status_description": "",
+            "incidents": [
+                {"name": "evillink",
+                 "impact": "major", "status": "identified",
+                 "shortlink": "https://status.claude.com/incidents/x"}
+            ],
+            "scheduled_maintenances": []
+        }"#;
+        let report = parse(body).unwrap();
+        assert!(
+            !report.status.contains('\u{1b}'),
+            "indicator: {:?}",
+            report.status
+        );
+        assert!(
+            !report.incidents[0].name.contains('\u{1b}'),
+            "name: {:?}",
+            report.incidents[0].name
+        );
+        // Legitimate text survives the strip.
+        assert!(report.incidents[0].name.contains("evillink"));
+        assert!(report.status.starts_with("major"));
+    }
+
+    #[test]
+    fn sanitize_for_tty_drops_csi_and_osc_sequences() {
+        // CSI `ESC [ 2 J` clears the screen; OSC `ESC ] 8 ; ; URL BEL` is the
+        // hyperlink sequence. Both should vanish; legitimate text around them
+        // survives.
+        let dirty = "beforec2Jmiddlelinkafter";
+        let clean = sanitize_for_tty(dirty);
+        assert!(!clean.contains('\u{1b}'), "got: {clean:?}");
+        assert!(clean.contains("before"));
+        assert!(clean.contains("middle"));
+        assert!(clean.contains("after"));
+        assert!(
+            clean.contains("link"),
+            "OSC hyperlink target stripped too: {clean:?}"
+        );
     }
 }
