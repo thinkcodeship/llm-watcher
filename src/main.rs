@@ -862,7 +862,11 @@ mod tests {
     }
 
     /// Build a status-page snapshot for renderer tests. Pure — no I/O.
-    fn status_page(status: &str, description: &str, incidents: Vec<(&str, &str)>) -> StatusPageReport {
+    fn status_page(
+        status: &str,
+        description: &str,
+        incidents: Vec<(&str, &str)>,
+    ) -> StatusPageReport {
         StatusPageReport {
             status: status.to_string(),
             description: description.to_string(),
@@ -905,7 +909,11 @@ mod tests {
         colored::control::unset_override();
 
         // header + 1 row, marker is appended to the same row, no extra line.
-        assert_eq!(lines.len(), 2, "marker rides the row, no extra line: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "marker rides the row, no extra line: {lines:?}"
+        );
         let row = &lines[1];
         assert!(row.contains("claude"), "{row}");
         assert!(row.contains("\u{26a0}"), "the warning glyph: {row}");
@@ -946,10 +954,10 @@ mod tests {
         // bold + red) rather than two separate ones, so each branch is pinned
         // to its exact opening sequence rather than parsed pieces.
         for (indicator, expected_open) in [
-            ("critical", "\u{1b}[1;31m"),     // bold + red
-            ("major", "\u{1b}[31m"),          // red
-            ("minor", "\u{1b}[33m"),          // yellow
-            ("maintenance", "\u{1b}[2m"),     // dim
+            ("critical", "\u{1b}[1;31m"), // bold + red
+            ("major", "\u{1b}[31m"),      // red
+            ("minor", "\u{1b}[33m"),      // yellow
+            ("maintenance", "\u{1b}[2m"), // dim
         ] {
             let page = status_page(indicator, "Test", vec![]);
             let marker = render_status_marker(&page);

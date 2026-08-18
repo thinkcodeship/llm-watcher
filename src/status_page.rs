@@ -69,15 +69,15 @@ struct WireIndicator {
 /// Fetch and parse a status-page summary. Network and parse failures return
 /// `Err`; callers collapse to `None` so the rest of the row is unaffected.
 pub fn fetch(url: &str) -> Result<StatusPageReport> {
-    let body = crate::provider::http_get(url, None)
-        .with_context(|| format!("querying {url}"))?;
+    let body = crate::provider::http_get(url, None).with_context(|| format!("querying {url}"))?;
     parse(&body)
 }
 
 /// Parse a captured `/api/v2/summary.json` body. Pure — no I/O — so the
 /// fixtures in `tests/fixtures/` exercise every branch without a network.
 pub fn parse(body: &str) -> Result<StatusPageReport> {
-    let wire: WireStatusPage = serde_json::from_str(body).context("parsing status page summary.json")?;
+    let wire: WireStatusPage =
+        serde_json::from_str(body).context("parsing status page summary.json")?;
     Ok(StatusPageReport {
         // The nested `status.description` is the canonical human text;
         // `status_description` is a duplicated top-level convenience field
@@ -105,8 +105,7 @@ mod tests {
 
     const PARTIAL_OUTAGE: &str =
         include_str!("../tests/fixtures/status_claude_partial_outage.json");
-    const OPERATIONAL: &str =
-        include_str!("../tests/fixtures/status_claude_operational.json");
+    const OPERATIONAL: &str = include_str!("../tests/fixtures/status_claude_operational.json");
     const MALFORMED: &str = include_str!("../tests/fixtures/status_claude_malformed.json");
 
     #[test]
@@ -154,9 +153,15 @@ mod tests {
         let report = parse(PARTIAL_OUTAGE).unwrap();
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains(r#""status":"major""#), "{json}");
-        assert!(json.contains(r#""description":"Partial System Outage""#), "{json}");
+        assert!(
+            json.contains(r#""description":"Partial System Outage""#),
+            "{json}"
+        );
         assert!(json.contains(r#""impact":"major""#), "{json}");
-        assert!(json.contains(r#""shortlink":"https://status.claude.com/incidents/"#), "{json}");
+        assert!(
+            json.contains(r#""shortlink":"https://status.claude.com/incidents/"#),
+            "{json}"
+        );
     }
 
     #[test]
