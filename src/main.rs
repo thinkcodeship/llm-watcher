@@ -777,24 +777,35 @@ mod tests {
     #[test]
     fn a_long_model_name_does_not_push_its_own_row_out_of_alignment() {
         // The scoped label shares the name column, so it has to be measured.
+        // Colour matters here: `render_window` returns `(text, visible_width)`
+        // and pads with spaces to that width, so the only correct measurement
+        // is the visible one. Counting raw chars silently folds in the escape
+        // sequences of any coloured cell — and a parallel test that leaves
+        // `colored::control::override` on produces a 9-char drift between the
+        // row and its sub-row even though the columns align on the terminal.
         let long = "Claude-Opus-With-A-Very-Long-Name";
         let reports = vec![report_with_scoped(
             long,
             window(61.0, Some(0.9), Some(200_000_000)),
         )];
+
+        // Force colour on so the path that actually escapes is exercised. The
+        // assertion below must hold in either state — that is the whole point.
+        colored::control::set_override(true);
         let lines = table_lines(&reports);
+        colored::control::unset_override();
 
         // The account row carries two cells and the scoped row only a weekly
         // one, so the weekly cell is the second `% used` on the first and the
         // first on the second. Comparing them positionally is the whole point:
         // an unmeasured label pushes the sub-row's weekly cell right.
-        let cell_starts = |line: &str| -> Vec<usize> {
+        let cell_starts_visible = |line: &str| -> Vec<usize> {
             line.match_indices("% used")
-                .map(|(i, _)| line[..i].chars().count())
+                .map(|(byte_idx, _)| visible_len(&line[..byte_idx]))
                 .collect()
         };
-        let account = cell_starts(&lines[1]);
-        let scoped = cell_starts(&lines[2]);
+        let account = cell_starts_visible(&lines[1]);
+        let scoped = cell_starts_visible(&lines[2]);
 
         assert_eq!(account.len(), 2, "account row has both cells: {lines:?}");
         assert_eq!(scoped.len(), 1, "scoped row has only a weekly cell");
