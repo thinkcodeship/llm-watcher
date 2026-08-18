@@ -1,4 +1,6 @@
 /target
+/build
+/reviews
 **/*.rs.bk
 *.log
 
@@ -33,3 +35,4 @@ Desktop.ini
 *.swp
 *.swo
 *~
+.claude/worktrees/
