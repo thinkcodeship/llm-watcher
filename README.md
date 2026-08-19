@@ -428,7 +428,7 @@ scoped windows are a list rather than a single field.
 ## Verify
 
 ```bash
-cargo test                          # 184 tests, no network
+cargo test                          # 222 tests, no network
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

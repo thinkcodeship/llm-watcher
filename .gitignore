@@ -4,6 +4,9 @@
 **/*.rs.bk
 *.log
 
+# Keeping this private for now
+.claude/rules/
+
 # Never commit a captured response that still holds a key or account id.
 /scratch
 
