@@ -26,6 +26,7 @@
   <nav class="masthead__nav" aria-label="Sections">
     <a href="#read">Reading a row</a>
     <a href="#install">Install</a>
+    <a href="#status">Status</a>
     <a href="#providers">Providers</a>
     <a href="https://github.com/thinkcodeship/llm-watcher">GitHub</a>
   </nav>
@@ -264,9 +265,57 @@ provider = <span class="t-str">"anthropic"</span>  <span class="t-dim"># aliases
 
   <hr class="rule">
 
+  <!-- ── provider status ────────────────────────────────────────────── -->
+  <section id="status" class="section">
+    <p class="eyebrow">05</p>
+    <h2>Provider status</h2>
+    <p class="lede">
+      When a row&rsquo;s provider has a public status page, <code>llm-watcher</code>
+      fetches it and appends a marker the moment the indicator is anything other
+      than <code>none</code>. A healthy run reads exactly as it did before — the
+      marker is the only difference.
+    </p>
+
+    <figure class="terminal">
+      <figcaption class="terminal__cap">A degraded run &mdash; Claude row carries the status page</figcaption>
+      <div class="terminal__body">
+<pre><code><span class="t-dim">PLAN         5H WINDOW                        WEEKLY</span>
+minimax       10% used   <span class="t-ok">0.1x</span>  resets 4h 50m   49% used   <span class="t-ok">0.8x</span>  resets 2d 10h
+glm           15% used   <span class="t-ok">0.2x</span>  resets 4h 45m   20% used   <span class="t-ok">0.3x</span>  resets 4d 13h
+claude         0% used     <span class="t-dim">--</span>  resets 4h 55m    3% used   <span class="t-ok">0.1x</span>  resets 4d 18h  <span class="t-warn">⚠ minor &mdash; Degraded performance for Claude Opus 5 and Claude Haiku 4.5</span></code></pre>
+      </div>
+    </figure>
+
+    <p>
+      The marker carries the Statuspage.io indicator
+      (<code>none</code> &middot; <code>minor</code> &middot; <code>major</code> &middot;
+      <code>critical</code> &middot; <code>maintenance</code> &middot;
+      <code>custom</code>), a colour band by severity, and the first open incident
+      name. <code>none</code> produces no marker, so a row that is healthy prints
+      nothing new &mdash; the same shape it had before this feature landed.
+    </p>
+
+    <p>
+      Only Anthropic is wired up today
+      (<a href="https://status.claude.com/api/v2/summary.json">status.claude.com</a>).
+      Adding another provider is one match arm on
+      <code>Provider::status_page_url()</code> plus a fixture in
+      <code>tests/fixtures/</code>. MiniMax and Z.ai return <code>None</code> until
+      their pages are verified.
+    </p>
+
+    <p class="aside">
+      The status fetch only runs when the quota fetch succeeds, so the hermetic
+      test suite never reaches the network. Failures collapse to an absent field,
+      not an error &mdash; the quota row is unaffected.
+    </p>
+  </section>
+
+  <hr class="rule">
+
   <!-- ── providers ──────────────────────────────────────────────────── -->
   <section id="providers" class="section">
-    <p class="eyebrow">05</p>
+    <p class="eyebrow">06</p>
     <h2>Providers</h2>
     <div class="table-scroll">
       <table class="table table--providers">

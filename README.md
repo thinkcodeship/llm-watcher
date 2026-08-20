@@ -82,8 +82,8 @@ When a row's provider has a public status page, `llm-watcher` fetches it and
 appends a marker when the indicator is anything other than `none`:
 
 ```
-claude        10% used  0.1x  resets 1h 37m   80% used  1.3x  resets 2d 14h  ⚠ major — Elevated API errors on Claude Opus 4.5
-  └ Fable                                     61% used  1.0x  resets 2d 14h
+claude         0% used     --  resets 4h 55m    3% used  0.1x  resets 4d 18h  ⚠ minor — Degraded performance for Claude Opus 5 and Claude Haiku 4.5
+  └ Fable                                      0% used  0.0x  resets 4d 18h
 ```
 
 The marker carries the Statuspage.io indicator (`none` | `minor` | `major` |
@@ -259,19 +259,19 @@ table, keeping stdout pipeable and the table one line per account.
   {
     "name": "claude",
     "provider": "anthropic",
-    "interval": { "used_percent": 10.0, "pace": 0.1481, "resets_in_ms": 5847754 },
-    "weekly":   { "used_percent": 80.0, "pace": 1.2794, "resets_in_ms": 226647754 },
+    "interval": { "used_percent": 0.0,  "resets_in_ms": 17700000000 },
+    "weekly":   { "used_percent": 3.0, "pace": 0.018, "resets_in_ms": 388800000 },
     "scoped": [
-      { "label": "Fable", "used_percent": 61.0, "pace": 0.9756, "resets_in_ms": 226647754 }
+      { "label": "Fable", "used_percent": 0.0, "pace": 0.0, "resets_in_ms": 388800000 }
     ],
     "status_page": {
-      "status": "major",
-      "description": "Partial System Outage",
+      "status": "minor",
+      "description": "Degraded performance for Claude Opus 5 and Claude Haiku 4.5",
       "incidents": [
-        { "name": "Elevated API errors on Claude Opus 4.5",
-          "impact": "major",
+        { "name": "Degraded performance for Claude Opus 5 and Claude Haiku 4.5",
+          "impact": "minor",
           "status": "identified",
-          "shortlink": "https://status.claude.com/incidents/abc123def456" }
+          "shortlink": "https://status.claude.com/incidents/" }
       ]
     }
   }
@@ -428,7 +428,7 @@ scoped windows are a list rather than a single field.
 ## Verify
 
 ```bash
-cargo test                          # 184 tests, no network
+cargo test                          # 222 tests, no network
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
