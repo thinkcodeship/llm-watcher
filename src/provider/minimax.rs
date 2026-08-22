@@ -18,7 +18,7 @@
 
 use crate::pace::Window;
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use super::Usage;
 
@@ -26,9 +26,22 @@ use super::Usage;
 /// potentially others) on their own independent quotas.
 const CODING_MODEL: &str = "general";
 
+/// MiniMax sometimes sends `"model_remains": null` — notably for pay-as-you-go
+/// keys, which the `/v1/token_plan/remains` endpoint has no business answering.
+/// The field is missing for some accounts and explicit-null for others; serde's
+/// `default` only catches the first. Collapse null onto the same empty list
+/// missing means, and let the existing "no entries" error carry the hint.
+fn deserialize_null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
 #[derive(Debug, Deserialize)]
 struct Response {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     model_remains: Vec<ModelRemain>,
     #[serde(default)]
     base_resp: Option<BaseResp>,
@@ -83,7 +96,14 @@ pub fn parse(body: &str) -> Result<Usage> {
         .iter()
         .find(|m| m.model_name == CODING_MODEL)
         .or_else(|| response.model_remains.first())
-        .ok_or_else(|| anyhow!("MiniMax returned no model_remains entries"))?;
+        .ok_or_else(|| {
+            // Reaching here means a 200 with status_code 0 and an empty (or null)
+            // model list — the documented shape of a pay-as-you-go key on the
+            // Token Plan endpoint. The 1004 path carries the same hint earlier.
+            anyhow!(
+                "MiniMax returned no model_remains entries — this usually means the API key is for a pay-as-you-go account, not a Token Plan Subscription Key (take the key from Account / Token Plan)"
+            )
+        })?;
 
     Ok(Usage::new(
         entry
@@ -153,6 +173,17 @@ mod tests {
     fn an_empty_model_list_is_an_error_not_a_blank_row() {
         let body = r#"{"model_remains":[],"base_resp":{"status_code":0,"status_msg":"success"}}"#;
         assert!(parse(body).is_err());
+    }
+
+    #[test]
+    fn a_null_model_remains_list_is_treated_as_empty_and_hints_at_the_wrong_key() {
+        // Pay-as-you-go keys get back a 200 with model_remains explicitly null.
+        // serde would fail with "expected a sequence"; we collapse it to empty
+        // and the wrong-key hint reaches the user.
+        let body = r#"{"model_remains":null,"base_resp":{"status_code":0,"status_msg":"success"}}"#;
+        let err = parse(body).unwrap_err().to_string();
+        assert!(err.contains("pay-as-you-go"), "{err}");
+        assert!(err.contains("Token Plan Subscription Key"), "{err}");
     }
 
     #[test]
